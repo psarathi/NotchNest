@@ -33,6 +33,7 @@ public final class NotchNestModel {
 
     /// Task currently linked to a Focus session or pinned as a Live Activity nudge.
     public var activeFocusTaskID: UUID?
+    public var taskRemainingSeconds: [UUID: TimeInterval] = [:]
     public var pinnedLiveActivityTaskID: UUID?
     public var dismissedEventIDs: Set<String> = []
     public var isAmbientPreviewActive = false
@@ -434,7 +435,8 @@ public final class NotchNestModel {
         scheduledDayKey: String? = nil,
         dueDate: Date? = nil,
         projectTag: String? = nil,
-        recurrence: TaskRecurrence = .none
+        recurrence: TaskRecurrence = .none,
+        targetMinutes: Int? = nil
     ) {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -459,7 +461,8 @@ public final class NotchNestModel {
             scheduledDayKey: resolvedDayKey,
             dueDate: dueDate,
             projectTag: projectTag,
-            recurrence: recurrence
+            recurrence: recurrence,
+            targetMinutes: targetMinutes
         )
         if settings.syncReminders && eventKit.reminderAuth == .authorized {
             item.reminderIdentifier = eventKit.upsertReminder(for: item)
@@ -490,7 +493,8 @@ public final class NotchNestModel {
             scheduledDayKey: parsed.scheduledDayKey,
             dueDate: parsed.dueDate,
             projectTag: parsed.projectTag,
-            recurrence: parsed.recurrence
+            recurrence: parsed.recurrence,
+            targetMinutes: parsed.targetMinutes
         )
     }
 
@@ -502,6 +506,7 @@ public final class NotchNestModel {
         if tasks[idx].isCompleted {
             triggerMascotPulse()
             recordTaskCompletion(delta: 1)
+            taskRemainingSeconds.removeValue(forKey: id)
             if pinnedLiveActivityTaskID == id {
                 pinnedLiveActivityTaskID = nil
             }
@@ -530,7 +535,9 @@ public final class NotchNestModel {
         title: String,
         priority: TaskPriority? = nil,
         bucket: TaskBucket? = nil,
-        dayKey: String? = nil
+        dayKey: String? = nil,
+        updateTargetMinutes: Bool = false,
+        targetMinutes: Int? = nil
     ) {
         guard let idx = tasks.firstIndex(where: { $0.id == id }) else { return }
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -539,6 +546,13 @@ public final class NotchNestModel {
         tasks[idx].title = trimmed
         if let priority {
             tasks[idx].priority = priority
+        }
+        if updateTargetMinutes {
+            tasks[idx].targetMinutes = targetMinutes.map { min(max(1, $0), 240) }
+            taskRemainingSeconds.removeValue(forKey: id)
+            if activeFocusTaskID == id && timer.state == .idle {
+                timer.configure(minutes: effectiveFocusMinutes(for: tasks[idx]), phase: .focus)
+            }
         }
         if let dayKey {
             tasks[idx].scheduledDayKey = dayKey
@@ -676,6 +690,7 @@ public final class NotchNestModel {
     public func deleteTask(_ id: UUID) {
         guard let idx = tasks.firstIndex(where: { $0.id == id }) else { return }
         let removed = tasks.remove(at: idx)
+        taskRemainingSeconds.removeValue(forKey: id)
         if pinnedLiveActivityTaskID == id { pinnedLiveActivityTaskID = nil }
         if activeFocusTaskID == id { activeFocusTaskID = nil }
         if settings.syncReminders && eventKit.reminderAuth == .authorized {
@@ -766,10 +781,45 @@ public final class NotchNestModel {
 
     // MARK: - Focus & Ambient Audio
 
+    public func effectiveFocusMinutes(for task: TaskItem? = nil) -> Int {
+        max(1, task?.targetMinutes ?? settings.focusMinutes)
+    }
+
+    public func selectFocusTask(_ taskID: UUID?) {
+        if let previousID = activeFocusTaskID,
+           previousID != taskID,
+           timer.phase == .focus,
+           timer.state != .idle {
+            timer.pause()
+            let rem = timer.remainingSeconds
+            if rem > 1 && rem < timer.totalDuration - 0.5 {
+                taskRemainingSeconds[previousID] = rem
+            } else {
+                taskRemainingSeconds.removeValue(forKey: previousID)
+            }
+        }
+
+        activeFocusTaskID = taskID
+        let targetTask = taskID.flatMap { id in tasks.first(where: { $0.id == id }) }
+        let total = TimeInterval(effectiveFocusMinutes(for: targetTask) * 60)
+        let rem = taskID.flatMap { taskRemainingSeconds[$0] } ?? total
+        timer.configure(totalSeconds: total, remainingSeconds: rem, phase: .focus)
+        syncAmbientAudio()
+        onHitRectNeedsUpdate?()
+    }
+
     public func startFocus(on taskID: UUID? = nil) {
         if let taskID {
-            activeFocusTaskID = taskID
+            let switchingTasks = activeFocusTaskID != taskID
+            if switchingTasks || timer.state == .idle {
+                selectFocusTask(taskID)
+            }
+        } else if timer.state == .idle, let linked = activeFocusTask {
+            let total = TimeInterval(effectiveFocusMinutes(for: linked) * 60)
+            let rem = taskRemainingSeconds[linked.id] ?? total
+            timer.configure(totalSeconds: total, remainingSeconds: rem, phase: .focus)
         }
+
         isAmbientPreviewActive = false
         if timer.state == .running {
             syncAmbientAudio()
@@ -778,11 +828,12 @@ public final class NotchNestModel {
         if timer.state == .paused {
             timer.resume()
         } else {
-            timer.start(minutes: settings.focusMinutes, phase: .focus)
+            timer.start()
+            let displayedMins = max(1, Int(ceil(timer.remainingSeconds / 60)))
             postTransientLiveActivity(
                 TransientLiveActivity(
                     category: .pomodoro,
-                    title: "Focus · \(settings.focusMinutes)m",
+                    title: "Focus · \(displayedMins)m",
                     subtitle: activeFocusTask?.title ?? settings.focusSoundscape.label,
                     badgeText: "FOCUS",
                     symbolName: "flame.fill",
@@ -794,16 +845,92 @@ public final class NotchNestModel {
         syncAmbientAudio()
     }
 
+    public func toggleFocus(on taskID: UUID) {
+        if activeFocusTaskID == taskID && timer.state == .running {
+            timer.pause()
+            if timer.phase == .focus {
+                taskRemainingSeconds[taskID] = timer.remainingSeconds
+            }
+            syncAmbientAudio()
+            onHitRectNeedsUpdate?()
+        } else {
+            startFocus(on: taskID)
+        }
+    }
+
+    public func setFocusDuration(minutes: Int, for taskID: UUID? = nil) {
+        let clamped = min(max(1, minutes), 240)
+        let resolvedID = taskID ?? activeFocusTaskID
+        if let targetID = resolvedID,
+           let idx = tasks.firstIndex(where: { $0.id == targetID }) {
+            tasks[idx].targetMinutes = clamped
+            taskRemainingSeconds.removeValue(forKey: targetID)
+            sortAndSaveTasks()
+            if targetID == activeFocusTaskID {
+                timer.configure(minutes: clamped, phase: .focus)
+            }
+        } else {
+            settings.focusMinutes = clamped
+            timer.configure(minutes: clamped, phase: .focus)
+        }
+        syncAmbientAudio()
+        onHitRectNeedsUpdate?()
+    }
+
+    public func completeActiveFocusTask() {
+        let linkedID = activeFocusTaskID
+        let elapsedSeconds = (timer.phase == .focus && timer.state != .idle)
+            ? max(0, timer.totalDuration - timer.remainingSeconds)
+            : 0
+        let elapsedMins = Int(elapsedSeconds / 60)
+
+        if let linkedID, let idx = tasks.firstIndex(where: { $0.id == linkedID }) {
+            if elapsedMins > 0 {
+                tasks[idx].focusedMinutes += elapsedMins
+                let today = DailyFocusStats.todayKey()
+                if focusStats.dayKey != today {
+                    focusStats = DailyFocusStats(dayKey: today)
+                }
+                focusStats.focusedMinutes += elapsedMins
+                persistence.saveStats(focusStats)
+                let currentHour = Calendar.current.component(.hour, from: Date())
+                updateTodayActivityRecord { record in
+                    record.focusedMinutes += elapsedMins
+                    record.hourlyFocusMinutes[currentHour, default: 0] += elapsedMins
+                }
+            }
+            taskRemainingSeconds.removeValue(forKey: linkedID)
+            timer.configure(minutes: settings.focusMinutes, phase: .focus)
+            syncAmbientAudio()
+            if !tasks[idx].isCompleted {
+                toggleTask(linkedID)
+            } else {
+                activeFocusTaskID = nil
+                sortAndSaveTasks()
+            }
+        } else {
+            resetFocusTimer()
+        }
+    }
+
     public func toggleFocusPlayPause() {
         isAmbientPreviewActive = false
         timer.togglePlayPause()
+        if timer.state == .paused, timer.phase == .focus, let id = activeFocusTaskID {
+            taskRemainingSeconds[id] = timer.remainingSeconds
+        }
         syncAmbientAudio()
     }
 
     public func resetFocusTimer() {
         isAmbientPreviewActive = false
-        timer.reset()
+        if let id = activeFocusTaskID {
+            taskRemainingSeconds.removeValue(forKey: id)
+        }
+        let mins = effectiveFocusMinutes(for: activeFocusTask)
+        timer.configure(minutes: mins, phase: .focus)
         syncAmbientAudio()
+        onHitRectNeedsUpdate?()
     }
 
     public func toggleAmbientPreview() {
@@ -1591,6 +1718,7 @@ public final class NotchNestModel {
             if let activeFocusTaskID,
                let idx = tasks.firstIndex(where: { $0.id == activeFocusTaskID }) {
                 tasks[idx].focusedMinutes += minutes
+                taskRemainingSeconds.removeValue(forKey: activeFocusTaskID)
                 persistence.saveTasks(tasks)
             }
         }

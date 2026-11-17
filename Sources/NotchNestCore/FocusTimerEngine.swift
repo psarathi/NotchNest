@@ -56,13 +56,19 @@ public final class FocusTimerEngine {
     }
 
     public func configure(minutes: Int, phase: TimerPhase) {
+        let seconds = TimeInterval(max(1, minutes) * 60)
+        configure(totalSeconds: seconds, remainingSeconds: seconds, phase: phase)
+    }
+
+    public func configure(totalSeconds: TimeInterval, remainingSeconds: TimeInterval, phase: TimerPhase) {
         stopTicking()
         self.phase = phase
-        self.state = .idle
-        let seconds = TimeInterval(max(1, minutes) * 60)
-        self.totalDuration = seconds
-        self.remainingSeconds = seconds
+        let safeTotal = max(1, totalSeconds)
+        let safeRemaining = min(max(0, remainingSeconds), safeTotal)
+        self.totalDuration = safeTotal
+        self.remainingSeconds = safeRemaining > 0 ? safeRemaining : safeTotal
         self.endDate = nil
+        self.state = (self.remainingSeconds < safeTotal - 0.5) ? .paused : .idle
     }
 
     public func start(minutes: Int? = nil, phase: TimerPhase? = nil) {

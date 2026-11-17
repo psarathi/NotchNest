@@ -20,12 +20,18 @@ struct TimerTabView: View {
 
                     Menu {
                         Button("No linked task") {
-                            model.activeFocusTaskID = nil
+                            model.selectFocusTask(nil)
                         }
                         Divider()
                         ForEach(model.tasks.filter { !$0.isCompleted }) { task in
-                            Button(task.title) {
-                                model.activeFocusTaskID = task.id
+                            Button {
+                                model.selectFocusTask(task.id)
+                            } label: {
+                                if let mins = task.targetMinutes {
+                                    Text("\(task.title) (\(mins)m)")
+                                } else {
+                                    Text(task.title)
+                                }
                             }
                         }
                     } label: {

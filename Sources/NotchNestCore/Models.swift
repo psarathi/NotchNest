@@ -149,6 +149,24 @@ public enum TaskPriority: String, Codable, Sendable, CaseIterable {
     case high
 }
 
+public enum TaskSortMode: String, Codable, CaseIterable, Sendable, Identifiable {
+    case manual
+    case priority
+    case dueTime
+    case duration
+
+    public var id: String { rawValue }
+
+    public var label: String {
+        switch self {
+        case .manual: return "Default"
+        case .priority: return "Priority"
+        case .dueTime: return "Due Time"
+        case .duration: return "Duration"
+        }
+    }
+}
+
 public struct TaskItem: Identifiable, Codable, Equatable, Sendable {
     public var id: UUID
     public var title: String
@@ -164,6 +182,7 @@ public struct TaskItem: Identifiable, Codable, Equatable, Sendable {
     public var recurrence: TaskRecurrence
     public var snoozedUntil: Date?
     public var focusedMinutes: Int
+    public var targetMinutes: Int?
 
     public init(
         id: UUID = UUID(),
@@ -179,7 +198,8 @@ public struct TaskItem: Identifiable, Codable, Equatable, Sendable {
         projectTag: String? = nil,
         recurrence: TaskRecurrence = .none,
         snoozedUntil: Date? = nil,
-        focusedMinutes: Int = 0
+        focusedMinutes: Int = 0,
+        targetMinutes: Int? = nil
     ) {
         self.id = id
         self.title = title
@@ -195,6 +215,7 @@ public struct TaskItem: Identifiable, Codable, Equatable, Sendable {
         self.recurrence = recurrence
         self.snoozedUntil = snoozedUntil
         self.focusedMinutes = focusedMinutes
+        self.targetMinutes = targetMinutes
     }
 
     enum CodingKeys: String, CodingKey {
@@ -212,6 +233,7 @@ public struct TaskItem: Identifiable, Codable, Equatable, Sendable {
         case recurrence
         case snoozedUntil
         case focusedMinutes
+        case targetMinutes
     }
 
     public init(from decoder: Decoder) throws {
@@ -231,6 +253,7 @@ public struct TaskItem: Identifiable, Codable, Equatable, Sendable {
         recurrence = try container.decodeIfPresent(TaskRecurrence.self, forKey: .recurrence) ?? .none
         snoozedUntil = try container.decodeIfPresent(Date.self, forKey: .snoozedUntil)
         focusedMinutes = try container.decodeIfPresent(Int.self, forKey: .focusedMinutes) ?? 0
+        targetMinutes = try container.decodeIfPresent(Int.self, forKey: .targetMinutes)
     }
 
     public func formattedDueTime() -> String? {
@@ -238,6 +261,27 @@ public struct TaskItem: Identifiable, Codable, Equatable, Sendable {
         let formatter = DateFormatter()
         formatter.dateFormat = "h:mm a"
         return formatter.string(from: dueDate)
+    }
+
+    public func formattedTargetDuration() -> String? {
+        guard let targetMinutes, targetMinutes > 0 else { return nil }
+        return "\(targetMinutes)m"
+    }
+
+    public func dueCountdownLabel(relativeTo now: Date = Date()) -> String? {
+        guard !isCompleted, let dueDate else { return nil }
+        let deltaSeconds = dueDate.timeIntervalSince(now)
+        guard deltaSeconds >= -300 && deltaSeconds <= 4 * 3600 else { return nil }
+        let mins = Int(ceil(deltaSeconds / 60))
+        if mins <= 0 {
+            return "due now"
+        }
+        if mins < 60 {
+            return "in \(mins)m"
+        }
+        let hrs = mins / 60
+        let rem = mins % 60
+        return rem == 0 ? "in \(hrs)h" : "in \(hrs)h \(rem)m"
     }
 
     public var detectedMeetingURL: URL? {

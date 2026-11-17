@@ -17,8 +17,8 @@ struct NotchNestCoreTests {
         #expect(!layout.hasHardwareNotch)
         #expect(layout.collapsedSize.width == 216)
         #expect(layout.collapsedSize.height == 29)
-        #expect(layout.expandedSize.width == 780)
-        #expect(layout.expandedSize.height == 448)
+        #expect(layout.expandedSize.width == 940)
+        #expect(layout.expandedSize.height == 478)
         #expect(layout.panelFrame.maxY == 900)
         #expect(abs(layout.panelFrame.midX - 720) < 0.01)
 
@@ -27,8 +27,8 @@ struct NotchNestCoreTests {
         #expect(collapsedHit.maxY == layout.panelFrame.height)
 
         let expandedHit = layout.activeHitRectInPanel(isExpanded: true)
-        #expect(expandedHit.width == 780)
-        #expect(expandedHit.height == 448)
+        #expect(expandedHit.width == 940)
+        #expect(expandedHit.height == 478)
     }
 
     @Test("Hardware-notched display layout accommodates physical notch width")
@@ -278,8 +278,8 @@ struct NotchNestCoreTests {
             visibleFrame: CGRect(x: 0, y: 0, width: 1440, height: 875)
         )
         let wideLayout = NotchGeometry.computeLayout(for: screen, preferredCollapsedWidth: 188, isWideDrawer: true)
-        #expect(wideLayout.expandedSize.width == 940)
-        #expect(wideLayout.expandedSize.height == 520)
+        #expect(wideLayout.expandedSize.width == 1040)
+        #expect(wideLayout.expandedSize.height == 540)
 
         // Full 7-day week columns & day-specific mid-week scheduling (no lump onto last day)
         let columns = model.weekPlanColumns()
@@ -802,5 +802,73 @@ struct NotchNestCoreTests {
         let decoded = try JSONDecoder().decode(AppSettings.self, from: legacyData)
         #expect(decoded.clipboardHistoryEnabled == true)
         #expect(decoded.showMicIndicatorInNotch == true)
+    }
+
+    @Test("Per-task countdown durations parse from NL, preserve remaining time on task switch, and complete cleanly")
+    @MainActor
+    func perTaskCountdownTimers() {
+        let ref = Date(timeIntervalSince1970: 1_760_000_000)
+
+        let nlWithDuration = NaturalLanguageTaskParser.parse(
+            "Prep slides for design review 45m #Work !high",
+            referenceDate: ref
+        )
+        #expect(nlWithDuration.targetMinutes == 45)
+        #expect(nlWithDuration.projectTag == "Work")
+        #expect(nlWithDuration.priority == .high)
+        #expect(nlWithDuration.title == "Prep slides for design review")
+
+        // Relative "in 20m" must stay a due-date offset rather than target duration
+        let nlWithRelativeDue = NaturalLanguageTaskParser.parse(
+            "Call Sam in 20m",
+            referenceDate: ref
+        )
+        #expect(nlWithRelativeDue.targetMinutes == nil)
+        #expect(nlWithRelativeDue.dueDate == ref.addingTimeInterval(20 * 60))
+
+        let soonTask = TaskItem(title: "Pay electricity bill", dueDate: ref.addingTimeInterval(42 * 60))
+        #expect(soonTask.dueCountdownLabel(relativeTo: ref) == "in 42m")
+
+        let farTask = TaskItem(title: "Next week", dueDate: ref.addingTimeInterval(8 * 3600))
+        #expect(farTask.dueCountdownLabel(relativeTo: ref) == nil)
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NotchNestTaskTimers-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let model = NotchNestModel(persistence: PersistenceStore(baseDirectory: tempDir), enableSystemIntegrations: false)
+        defer { model.shutdown() }
+
+        model.addParsedTask("Prep slides 45m #Work", defaultBucket: .today)
+        model.addParsedTask("Pay bill 15m #Home", defaultBucket: .today)
+
+        let slides = model.tasks.first(where: { $0.title == "Prep slides" })!
+        let bill = model.tasks.first(where: { $0.title == "Pay bill" })!
+        #expect(slides.targetMinutes == 45)
+        #expect(bill.targetMinutes == 15)
+
+        model.selectFocusTask(slides.id)
+        #expect(model.timer.formattedRemaining == "45:00")
+        #expect(model.activeFocusTaskID == slides.id)
+
+        // Simulate partially running slides countdown and switching to bill
+        model.timer.configure(totalSeconds: 45 * 60, remainingSeconds: 30 * 60, phase: .focus)
+        model.selectFocusTask(bill.id)
+        #expect(model.timer.formattedRemaining == "15:00")
+        #expect(model.taskRemainingSeconds[slides.id] == TimeInterval(30 * 60))
+
+        // Switching back restores slides at 30:00
+        model.selectFocusTask(slides.id)
+        #expect(model.timer.formattedRemaining == "30:00")
+
+        // Updating duration sets targetMinutes and resets clock cleanly
+        model.setFocusDuration(minutes: 60, for: slides.id)
+        #expect(model.tasks.first(where: { $0.id == slides.id })?.targetMinutes == 60)
+        #expect(model.timer.formattedRemaining == "60:00")
+
+        // Completing active focus task marks task completed & resets focus link
+        model.completeActiveFocusTask()
+        #expect(model.tasks.first(where: { $0.id == slides.id })?.isCompleted == true)
+        #expect(model.activeFocusTaskID == nil)
     }
 }

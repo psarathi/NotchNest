@@ -2,6 +2,11 @@ import AppKit
 import NotchNestCore
 import SwiftUI
 
+private enum WorkspaceDictationTarget: Equatable {
+    case taskInput
+    case notepad(noteID: UUID, baseBody: String)
+}
+
 struct TodayTabView: View {
     @Bindable var model: NotchNestModel
     let onRequestFocus: () -> Void
@@ -9,6 +14,7 @@ struct TodayTabView: View {
     @State private var draftTitle = ""
     @State private var newPriority: TaskPriority = .normal
     @State private var showCompleted = true
+    @State private var sortMode: TaskSortMode = .manual
     @State private var dayOffset = 0
     @State private var selectedCalendarDate = Calendar.current.startOfDay(for: Date())
     @State private var editingTaskID: UUID?
@@ -16,11 +22,22 @@ struct TodayTabView: View {
     @State private var editPriority: TaskPriority = .normal
     @State private var editBucket: TaskBucket = .today
     @State private var editDayKey: String?
+    @State private var editTargetMinutes: Int?
+    @State private var dictationTarget: WorkspaceDictationTarget?
+    @State private var notepadFeedback: String?
+
     @FocusState private var isAddingFocused: Bool
+    @FocusState private var isNotepadFocused: Bool
 
     private static let dateHeaderFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "d MMM"
+        return f
+    }()
+
+    private static let fullDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "d MMM yyyy"
         return f
     }()
 
@@ -65,12 +82,32 @@ struct TodayTabView: View {
     }
 
     var body: some View {
-        HStack(spacing: 11) {
-            sageTasksCard
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        GeometryReader { geo in
+            let gap: CGFloat = 9
+            let usable = max(560, geo.size.width - gap * 3)
+            let tasksW = usable * 0.275
+            let focusW = usable * 0.215
+            let notepadW = usable * 0.225
+            let calendarW = usable * 0.285
 
-            rightCalendarAndFocusColumn
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            HStack(spacing: gap) {
+                sageTasksCard
+                    .frame(width: tasksW)
+                    .frame(maxHeight: .infinity)
+
+                lavenderFocusCard
+                    .frame(width: focusW)
+                    .frame(maxHeight: .infinity)
+
+                yellowNotepadCard
+                    .frame(width: notepadW)
+                    .frame(maxHeight: .infinity)
+
+                steelBlueCalendarCard
+                    .frame(width: calendarW)
+                    .frame(maxHeight: .infinity)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .onAppear {
             if model.isExpanded && model.activeTab == .today && NSApp.keyWindow != nil {
@@ -89,6 +126,7 @@ struct TodayTabView: View {
             model.pendingWorkspaceTypedSeed = ""
         }
         onRequestFocus()
+        isNotepadFocused = false
         isAddingFocused = true
         DispatchQueue.main.async {
             if let textView = NSApp.keyWindow?.firstResponder as? NSTextView {
@@ -98,7 +136,7 @@ struct TodayTabView: View {
         }
     }
 
-    // MARK: - Signature Sage Green Today Card
+    // MARK: - Column 1: Signature Matte Sage Green Tasks
 
     private var currentTaskBoardTitle: String {
         switch dayOffset {
@@ -117,51 +155,83 @@ struct TodayTabView: View {
         return Self.dateHeaderFormatter.string(from: day)
     }
 
+    private func sortedDayTasks(_ source: [TaskItem]) -> [TaskItem] {
+        switch sortMode {
+        case .manual:
+            return source
+        case .priority:
+            return source.sorted { lhs, rhs in
+                if lhs.isCompleted != rhs.isCompleted { return !lhs.isCompleted }
+                if lhs.priority != rhs.priority { return lhs.priority == .high }
+                return lhs.createdAt > rhs.createdAt
+            }
+        case .dueTime:
+            return source.sorted { lhs, rhs in
+                if lhs.isCompleted != rhs.isCompleted { return !lhs.isCompleted }
+                switch (lhs.dueDate, rhs.dueDate) {
+                case (.some(let l), .some(let r)): return l < r
+                case (.some, .none): return true
+                case (.none, .some): return false
+                default: return lhs.createdAt > rhs.createdAt
+                }
+            }
+        case .duration:
+            return source.sorted { lhs, rhs in
+                if lhs.isCompleted != rhs.isCompleted { return !lhs.isCompleted }
+                let lDur = lhs.targetMinutes ?? 0
+                let rDur = rhs.targetMinutes ?? 0
+                if lDur != rDur { return lDur > rDur }
+                return lhs.createdAt > rhs.createdAt
+            }
+        }
+    }
+
     private var sageTasksCard: some View {
         let dayTasks = model.tasks(forDayOffset: dayOffset)
         let openCount = dayTasks.filter { !$0.isCompleted }.count
         let doneCount = dayTasks.filter { $0.isCompleted }.count
-        let visibleTasks = showCompleted ? dayTasks : dayTasks.filter { !$0.isCompleted }
+        let filtered = showCompleted ? dayTasks : dayTasks.filter { !$0.isCompleted }
+        let visibleTasks = sortedDayTasks(filtered)
 
-        return VStack(alignment: .leading, spacing: 8) {
-            // Sage task board header (< date selector > + Wrap-up)
-            HStack(spacing: 6) {
+        return VStack(alignment: .leading, spacing: 7) {
+            // Header + date navigation
+            HStack(spacing: 4) {
                 Text(currentTaskBoardTitle)
-                    .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
                     .foregroundStyle(NotchTheme.sageInk)
                     .lineLimit(1)
-
-                Spacer(minLength: 2)
+                    .minimumScaleFactor(0.85)
 
                 Button {
                     model.activeUtilityOverlay = .wrapUp
                 } label: {
                     Image(systemName: "moon.stars")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(NotchTheme.sageInk.opacity(0.72))
-                        .frame(width: 22, height: 22)
-                        .background(Color.black.opacity(0.06), in: Circle())
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(NotchTheme.sageInk.opacity(0.68))
+                        .frame(width: 20, height: 20)
                 }
                 .buttonStyle(.plain)
                 .help("Daily Wrap Up")
 
-                HStack(spacing: 3) {
+                Spacer(minLength: 2)
+
+                HStack(spacing: 2) {
                     Button {
                         dayOffset = max(-1, dayOffset - 1)
                     } label: {
                         Image(systemName: "chevron.left")
-                            .font(.system(size: 9.5, weight: .bold))
+                            .font(.system(size: 9, weight: .bold))
                             .foregroundStyle(NotchTheme.sageInk.opacity(dayOffset <= -1 ? 0.25 : 0.7))
-                            .frame(width: 18, height: 20)
+                            .frame(width: 15, height: 18)
                     }
                     .buttonStyle(.plain)
                     .disabled(dayOffset <= -1)
 
                     HStack(spacing: 3) {
                         Image(systemName: "calendar")
-                            .font(.system(size: 9.5, weight: .semibold))
+                            .font(.system(size: 9, weight: .semibold))
                         Text(currentPillDateLabel)
-                            .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                            .font(.system(size: 10, weight: .semibold, design: .rounded))
                     }
                     .foregroundStyle(NotchTheme.sageInk)
                     .onTapGesture {
@@ -172,47 +242,47 @@ struct TodayTabView: View {
                         dayOffset = min(6, dayOffset + 1)
                     } label: {
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 9.5, weight: .bold))
+                            .font(.system(size: 9, weight: .bold))
                             .foregroundStyle(NotchTheme.sageInk.opacity(dayOffset >= 6 ? 0.25 : 0.7))
-                            .frame(width: 18, height: 20)
+                            .frame(width: 15, height: 18)
                     }
                     .buttonStyle(.plain)
                     .disabled(dayOffset >= 6)
                 }
-                .padding(.horizontal, 6)
+                .padding(.horizontal, 5)
                 .padding(.vertical, 2)
                 .background(Color.black.opacity(0.06), in: Capsule())
             }
 
-            // Counter pills + utilities
-            HStack(spacing: 6) {
+            // Counter pills
+            HStack(spacing: 5) {
                 Text("To do \(openCount)")
-                    .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2.5)
                     .background(NotchTheme.sageBadgeFill, in: Capsule())
 
                 Button {
                     showCompleted.toggle()
                 } label: {
                     Text("Completed \(doneCount)")
-                        .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
                         .foregroundStyle(NotchTheme.sageInk.opacity(showCompleted ? 0.85 : 0.45))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
                         .background(Color.black.opacity(0.08), in: Capsule())
                 }
                 .buttonStyle(.plain)
                 .help("Toggle completed tasks")
 
-                Spacer()
+                Spacer(minLength: 2)
 
                 if doneCount > 0 {
                     Button("Clear") {
                         model.clearCompletedTasks()
                     }
-                    .font(.system(size: 10.5, weight: .medium))
+                    .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(NotchTheme.sageMuted)
                     .buttonStyle(.plain)
                 }
@@ -222,25 +292,24 @@ struct TodayTabView: View {
                         Task { await model.syncWithReminders() }
                     } label: {
                         Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: 10.5, weight: .semibold))
+                            .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(NotchTheme.sageBadgeFill)
                     }
                     .buttonStyle(.plain)
-                    .help("Sync with Reminders (NotchNest list)")
+                    .help("Sync with Apple Reminders")
                 }
             }
 
-            Divider()
-                .overlay(Color.black.opacity(0.11))
+            dottedSeparator
 
             // Task list
             if visibleTasks.isEmpty {
-                VStack(spacing: 7) {
+                VStack(spacing: 6) {
                     Spacer()
-                    OwlMascotView(size: 28, isFocusing: false, isHovering: false, pulse: false, animationsEnabled: false)
+                    OwlMascotView(size: 24, isFocusing: false, isHovering: false, pulse: false, animationsEnabled: false)
                         .opacity(0.75)
-                    Text("Clear slate here — type or tap the mic below.")
-                        .font(.system(size: 11.5, weight: .medium))
+                    Text("Clear slate here — add a task below.")
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(NotchTheme.sageMuted)
                         .multilineTextAlignment(.center)
                     Spacer()
@@ -253,15 +322,8 @@ struct TodayTabView: View {
                             sageTaskRow(item)
 
                             if item.id != visibleTasks.last?.id {
-                                Rectangle()
-                                    .fill(Color.clear)
-                                    .frame(height: 1)
-                                    .overlay(
-                                        Line()
-                                            .stroke(style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
-                                            .foregroundStyle(Color.black.opacity(0.12))
-                                    )
-                                    .padding(.vertical, 3)
+                                dottedSeparator
+                                    .padding(.vertical, 2)
                             }
                         }
                     }
@@ -271,117 +333,154 @@ struct TodayTabView: View {
 
             // Natural-language & quick-command preview bar above quick entry
             if let command = parsedCommandPreview {
-                HStack(spacing: 5) {
+                HStack(spacing: 4) {
                     Image(systemName: "command.circle.fill")
-                        .font(.system(size: 10.5, weight: .semibold))
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(NotchTheme.sageBadgeFill)
                     Text(command.previewLabel)
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .foregroundStyle(NotchTheme.sageInk.opacity(0.92))
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(NotchTheme.sageInk.opacity(0.9))
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
-                .padding(.horizontal, 4)
+                .padding(.horizontal, 3)
             } else if let summary = parsedPreview?.previewSummary() {
-                HStack(spacing: 5) {
+                HStack(spacing: 4) {
                     Image(systemName: "sparkles")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: 9.5, weight: .semibold))
                         .foregroundStyle(NotchTheme.sageBadgeFill)
                     Text(summary)
-                        .font(.system(size: 10.5, weight: .medium))
+                        .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(NotchTheme.sageInk.opacity(0.85))
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
-                .padding(.horizontal, 4)
-            } else if let voiceErr = model.voiceCapture.errorMessage {
+                .padding(.horizontal, 3)
+            } else if let voiceErr = model.voiceCapture.errorMessage, dictationTarget == .taskInput {
                 Text(voiceErr)
-                    .font(.system(size: 10))
+                    .font(.system(size: 9.5))
                     .foregroundStyle(.red.opacity(0.85))
                     .lineLimit(1)
-                    .padding(.horizontal, 4)
+                    .padding(.horizontal, 3)
             }
 
-            // Quick add + Voice dictation bar
-            HStack(spacing: 7) {
-                Button {
-                    newPriority = (newPriority == .high) ? .normal : .high
-                } label: {
-                    Image(systemName: newPriority == .high ? "flag.fill" : "plus")
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundStyle(newPriority == .high ? .orange : NotchTheme.sageMuted)
-                }
-                .buttonStyle(.plain)
-                .help("Toggle high priority")
+            dottedSeparator
 
-                TextField("Add task or command… (note:, 25m focus, tr es:, snap left)", text: $draftTitle)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(NotchTheme.sageInk)
-                    .focused($isAddingFocused)
-                    .onTapGesture {
+            // Quick add + Voice dictation + Sort row
+            HStack(spacing: 5) {
+                HStack(spacing: 5) {
+                    Button {
+                        newPriority = (newPriority == .high) ? .normal : .high
+                    } label: {
+                        Image(systemName: newPriority == .high ? "flag.fill" : "plus")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(newPriority == .high ? .orange : NotchTheme.sageMuted)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Toggle high priority")
+
+                    TextField("Add a task or command…", text: $draftTitle)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(NotchTheme.sageInk)
+                        .focused($isAddingFocused)
+                        .onTapGesture {
+                            onRequestFocus()
+                            isNotepadFocused = false
+                            isAddingFocused = true
+                        }
+                        .onSubmit {
+                            submitDraftTask()
+                        }
+
+                    Button {
                         onRequestFocus()
-                        isAddingFocused = true
-                    }
-                    .onSubmit {
-                        submitDraftTask()
-                    }
-
-                Button {
-                    onRequestFocus()
-                    model.voiceCapture.onTranscriptUpdated = { text in
-                        draftTitle = text
-                    }
-                    Task {
-                        await model.voiceCapture.toggleRecording()
-                    }
-                } label: {
-                    if model.voiceCapture.isRecording {
-                        HStack(spacing: 4) {
+                        dictationTarget = .taskInput
+                        model.voiceCapture.onTranscriptUpdated = { text in
+                            draftTitle = text
+                        }
+                        Task {
+                            await model.voiceCapture.toggleRecording()
+                        }
+                    } label: {
+                        if model.voiceCapture.isRecording && dictationTarget == .taskInput {
                             AnimatedWaveformView(
                                 isActive: true,
                                 barColor: NotchTheme.coralAlert,
-                                barWidth: 2,
-                                maxHeight: 11
+                                barWidth: 1.8,
+                                maxHeight: 10
                             )
-                            Text("Stop")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(NotchTheme.coralAlert)
+                        } else {
+                            Image(systemName: "mic.fill")
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(NotchTheme.sageMuted)
                         }
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(Color.black.opacity(0.10), in: Capsule())
-                    } else {
-                        Image(systemName: "mic.fill")
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(NotchTheme.sageMuted)
-                            .padding(4)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Dictate task with voice")
+
+                    if !draftTitle.trimmingCharacters(in: .whitespaces).isEmpty {
+                        Button(action: submitDraftTask) {
+                            Image(systemName: "arrow.up.circle.fill")
+                                .font(.system(size: 14))
+                                .foregroundStyle(NotchTheme.sageBadgeFill)
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
-                .buttonStyle(.plain)
-                .help("Dictate task with voice")
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(NotchTheme.sageInputFill, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                )
 
-                Button(action: submitDraftTask) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 16))
-                        .foregroundStyle(
-                            draftTitle.trimmingCharacters(in: .whitespaces).isEmpty
-                                ? NotchTheme.sageInk.opacity(0.25)
-                                : NotchTheme.sageBadgeFill
-                        )
+                Menu {
+                    ForEach(TaskSortMode.allCases) { mode in
+                        Button {
+                            sortMode = mode
+                        } label: {
+                            HStack {
+                                Text(mode.label)
+                                if sortMode == mode {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "arrow.up.arrow.down")
+                            .font(.system(size: 9.5, weight: .semibold))
+                        Text(sortMode == .manual ? "Sort" : sortMode.label)
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .foregroundStyle(NotchTheme.sageMuted)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Sort tasks (Default, Priority, Due Time, Duration)")
             }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 7)
-            .background(NotchTheme.sageInputFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(Color.black.opacity(0.10), lineWidth: 1)
-            )
         }
-        .padding(12)
+        .padding(11)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(NotchTheme.sagePaper, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private var dottedSeparator: some View {
+        Rectangle()
+            .fill(Color.clear)
+            .frame(height: 1)
+            .overlay(
+                Line()
+                    .stroke(style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
+                    .foregroundStyle(Color.black.opacity(0.13))
+            )
     }
 
     @ViewBuilder
@@ -392,6 +491,7 @@ struct TodayTabView: View {
                 priority: $editPriority,
                 bucket: $editBucket,
                 dayKey: $editDayKey,
+                targetMinutes: $editTargetMinutes,
                 columns: model.weekPlanColumns(),
                 onRequestFocus: onRequestFocus,
                 onSave: {
@@ -400,7 +500,9 @@ struct TodayTabView: View {
                         title: editTitle,
                         priority: editPriority,
                         bucket: editBucket,
-                        dayKey: editDayKey
+                        dayKey: editDayKey,
+                        updateTargetMinutes: true,
+                        targetMinutes: editTargetMinutes
                     )
                     editingTaskID = nil
                 },
@@ -414,68 +516,95 @@ struct TodayTabView: View {
                 isDarkSurface: false
             )
         } else {
-            let isFocusedTask = model.activeFocusTaskID == item.id && model.timer.state != .idle
-            let isPinnedNudge = model.pinnedLiveActivityTaskID == item.id
+            let isLinkedTask = model.activeFocusTaskID == item.id
+            let isRunningHere = isLinkedTask && model.timer.state == .running
+            let savedRemaining = model.taskRemainingSeconds[item.id]
+            let isPausedCountdown = (isLinkedTask && model.timer.state == .paused) || (!isLinkedTask && savedRemaining != nil)
+            let dueCountdown = item.dueCountdownLabel()
 
-            HStack(alignment: .center, spacing: 6) {
+            HStack(alignment: .center, spacing: 5) {
                 Button {
                     model.toggleTask(item.id)
                 } label: {
                     Image(systemName: item.isCompleted ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 15))
+                        .font(.system(size: 14))
                         .foregroundStyle(item.isCompleted ? NotchTheme.mintComplete : NotchTheme.sageInk.opacity(0.62))
-                        .frame(width: 22, height: 22)
+                        .frame(width: 20, height: 20)
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.title)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: 11.5, weight: .medium))
                         .foregroundStyle(item.isCompleted ? NotchTheme.sageMuted.opacity(0.65) : NotchTheme.sageInk)
                         .strikethrough(item.isCompleted, color: NotchTheme.sageMuted.opacity(0.6))
                         .lineLimit(1)
                         .truncationMode(.tail)
 
-                    if item.dueDate != nil || item.projectTag != nil || item.priority == .high || item.recurrence != .none || item.focusedMinutes > 0 || item.detectedMeetingURL != nil {
-                        HStack(spacing: 5) {
-                            if let time = item.formattedDueTime() {
-                                Label(time, systemImage: "clock")
-                                    .font(.system(size: 9.5, weight: .medium))
-                                    .foregroundStyle(NotchTheme.sageMuted)
-                            }
-                            if item.focusedMinutes > 0 {
-                                Text("Focused · \(item.focusedMinutes)m")
-                                    .font(.system(size: 9.5, weight: .medium))
-                                    .foregroundStyle(NotchTheme.sageMuted)
-                            }
-                            if item.priority == .high && !item.isCompleted {
-                                Label("High", systemImage: "flag.fill")
-                                    .font(.system(size: 9.5, weight: .semibold))
-                                    .foregroundStyle(Color(red: 0.72, green: 0.25, blue: 0.14))
-                            }
-                            if let tag = item.projectTag {
-                                Text(tag)
-                                    .font(.system(size: 9.5, weight: .semibold))
-                                    .foregroundStyle(NotchTheme.sageBadgeFill)
+                    if item.dueDate != nil || item.projectTag != nil || item.priority == .high || item.recurrence != .none || item.focusedMinutes > 0 || item.targetMinutes != nil || isLinkedTask || savedRemaining != nil || item.detectedMeetingURL != nil {
+                        HStack(spacing: 4) {
+                            if isRunningHere {
+                                Label(model.timer.formattedRemaining, systemImage: "timer")
+                                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(.white)
                                     .padding(.horizontal, 5)
                                     .padding(.vertical, 1)
-                                    .background(Color.black.opacity(0.08), in: Capsule())
-                            }
-                            if let rec = item.recurrence.label {
-                                Label(rec, systemImage: "repeat")
-                                    .font(.system(size: 9.5))
+                                    .background(NotchTheme.sageBadgeFill, in: Capsule())
+                            } else if isPausedCountdown {
+                                let rem = isLinkedTask ? model.timer.remainingSeconds : (savedRemaining ?? 0)
+                                Label(Self.formatCountdown(rem), systemImage: "pause.circle")
+                                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                                    .foregroundStyle(NotchTheme.sageBadgeFill)
+                            } else if let targetMins = item.targetMinutes {
+                                Label("\(targetMins)m", systemImage: "timer")
+                                    .font(.system(size: 9, weight: .medium))
                                     .foregroundStyle(NotchTheme.sageMuted)
                             }
+
+                            if item.focusedMinutes > 0 {
+                                Text("Focused · \(item.focusedMinutes)m")
+                                    .font(.system(size: 9, weight: .medium))
+                                    .foregroundStyle(NotchTheme.sageMuted)
+                                    .lineLimit(1)
+                            }
+
+                            if item.priority == .high && !item.isCompleted {
+                                Label("High", systemImage: "flag.fill")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .foregroundStyle(Color(red: 0.65, green: 0.22, blue: 0.14))
+                            }
+
+                            if let time = item.formattedDueTime() {
+                                Label(dueCountdown.map { "\(time) (\($0))" } ?? time, systemImage: "bell")
+                                    .font(.system(size: 9, weight: .medium))
+                                    .foregroundStyle(NotchTheme.sageMuted)
+                                    .lineLimit(1)
+                            }
+
+                            if let tag = item.projectTag {
+                                Label(tag, systemImage: "briefcase")
+                                    .font(.system(size: 9, weight: .medium))
+                                    .foregroundStyle(NotchTheme.sageMuted)
+                                    .lineLimit(1)
+                            }
+
+                            if let rec = item.recurrence.label {
+                                Label(rec, systemImage: "repeat")
+                                    .font(.system(size: 9, weight: .medium))
+                                    .foregroundStyle(NotchTheme.sageMuted)
+                                    .lineLimit(1)
+                            }
+
                             if let joinURL = item.detectedMeetingURL {
                                 Button {
                                     model.joinMeeting(url: joinURL, title: item.title)
                                 } label: {
-                                    Label("Join \(MeetingLinkExtractor.serviceLabel(for: joinURL))", systemImage: "video.fill")
-                                        .font(.system(size: 9.5, weight: .bold))
+                                    Label(MeetingLinkExtractor.serviceLabel(for: joinURL), systemImage: "video.fill")
+                                        .font(.system(size: 9, weight: .bold))
                                         .foregroundStyle(.white)
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 1.5)
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 1)
                                         .background(NotchTheme.sageBadgeFill, in: Capsule())
                                 }
                                 .buttonStyle(.plain)
@@ -488,46 +617,33 @@ struct TodayTabView: View {
                     beginEditing(item)
                 }
 
-                Spacer(minLength: 4)
+                Spacer(minLength: 2)
 
                 if !item.isCompleted {
                     Button {
-                        model.pinTaskAsLiveNudge(item.id)
+                        model.toggleFocus(on: item.id)
                     } label: {
-                        Image(systemName: isPinnedNudge ? "bell.badge.fill" : "bell")
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(isPinnedNudge ? NotchTheme.peachAction : NotchTheme.sageMuted.opacity(0.75))
-                            .frame(width: 20, height: 22)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Pin Live Activity nudge in notch")
-
-                    Button {
-                        model.startFocus(on: item.id)
-                        model.activeTab = .timer
-                    } label: {
-                        Image(systemName: isFocusedTask ? "pause.fill" : "play.fill")
-                            .font(.system(size: 9.5, weight: .bold))
-                            .foregroundStyle(isFocusedTask ? .white : NotchTheme.sageInk.opacity(0.75))
-                            .frame(width: 20, height: 20)
+                        Image(systemName: isRunningHere ? "pause.fill" : "play.fill")
+                            .font(.system(size: 8.5, weight: .bold))
+                            .foregroundStyle(isRunningHere ? .white : NotchTheme.sageInk.opacity(0.68))
+                            .frame(width: 18, height: 18)
                             .background(
                                 Circle()
-                                    .fill(isFocusedTask ? NotchTheme.sageBadgeFill : Color.black.opacity(0.08))
+                                    .fill(isRunningHere ? NotchTheme.sageBadgeFill : Color.black.opacity(0.06))
                             )
                             .contentShape(Circle())
                     }
                     .buttonStyle(.plain)
-                    .help("Start focus timer for this task")
+                    .help(isRunningHere ? "Pause task countdown" : "Start countdown for this task")
                 }
 
                 Button {
                     beginEditing(item)
                 } label: {
                     Image(systemName: "square.and.pencil")
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .foregroundStyle(NotchTheme.sageMuted.opacity(0.8))
-                        .frame(width: 20, height: 22)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(NotchTheme.sageMuted.opacity(0.75))
+                        .frame(width: 17, height: 20)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -536,43 +652,16 @@ struct TodayTabView: View {
                 TaskActionsMenu(
                     model: model,
                     item: item,
-                    iconColor: NotchTheme.sageMuted.opacity(0.85),
+                    iconColor: NotchTheme.sageMuted.opacity(0.8),
                     onStartEdit: { beginEditing(item) }
                 )
-
-                Button {
-                    model.deleteTask(item.id)
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(NotchTheme.sageMuted.opacity(0.8))
-                        .frame(width: 20, height: 22)
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .help("Delete task")
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, 4)
             .padding(.vertical, 5)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(isFocusedTask ? Color.black.opacity(0.10) : Color.clear)
+                    .fill(isLinkedTask ? Color.black.opacity(0.08) : Color.clear)
             )
-            .contextMenu {
-                Button("Edit Task") { beginEditing(item) }
-                Button(item.priority == .high ? "Normal Priority" : "High Priority") {
-                    model.toggleTaskPriority(item.id)
-                }
-                Menu("Move to") {
-                    ForEach(TaskBucket.allCases) { bucket in
-                        Button(bucket.title) { model.moveTask(item.id, to: bucket) }
-                    }
-                }
-                Divider()
-                Button("Delete Task", role: .destructive) {
-                    model.deleteTask(item.id)
-                }
-            }
         }
     }
 
@@ -582,10 +671,14 @@ struct TodayTabView: View {
         editPriority = item.priority
         editBucket = item.scheduledBucket
         editDayKey = item.scheduledDayKey
+        editTargetMinutes = item.targetMinutes
     }
 
     private func submitDraftTask() {
-        model.voiceCapture.stopRecording()
+        if dictationTarget == .taskInput {
+            model.voiceCapture.stopRecording()
+            dictationTarget = nil
+        }
         let trimmed = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
@@ -608,16 +701,472 @@ struct TodayTabView: View {
         newPriority = .normal
     }
 
-    // MARK: - Right Misty Steel-Blue 7-Day Calendar & Compact Focus
-
-    private var rightCalendarAndFocusColumn: some View {
-        VStack(spacing: 10) {
-            steelBlueCalendarCard
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            focusCompactCard
-        }
+    private static func formatCountdown(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(ceil(seconds)))
+        return String(format: "%02d:%02d", total / 60, total % 60)
     }
+
+    // MARK: - Column 2: Matte Pastel Lavender Focus Countdown Card
+
+    private var lavenderFocusCard: some View {
+        let openTasks = model.tasks.filter { !$0.isCompleted }
+        let linkedTask = model.activeFocusTask
+        let isRunning = model.timer.state == .running
+        let statusLabel: String = {
+            switch model.timer.state {
+            case .running:
+                return model.timer.phase == .shortBreak ? "Break" : "Focusing"
+            case .paused:
+                return "Paused"
+            case .idle:
+                return model.timer.phase == .shortBreak ? "Break Ready" : "Ready"
+            }
+        }()
+
+        return VStack(spacing: 0) {
+            Capsule()
+                .fill(Color.black.opacity(0.16))
+                .frame(width: 22, height: 3)
+                .padding(.bottom, 10)
+
+            // Task selector dropdown matching screenshot top pill
+            Menu {
+                Button {
+                    model.selectFocusTask(nil)
+                } label: {
+                    HStack {
+                        Text("Free focus (\(model.settings.focusMinutes)m)")
+                        if linkedTask == nil { Image(systemName: "checkmark") }
+                    }
+                }
+
+                if !openTasks.isEmpty {
+                    Divider()
+                    ForEach(openTasks) { task in
+                        Button {
+                            model.selectFocusTask(task.id)
+                        } label: {
+                            let label = task.targetMinutes.map { "\(task.title) (\($0)m)" } ?? task.title
+                            HStack {
+                                Text(label)
+                                if linkedTask?.id == task.id {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(linkedTask?.title ?? "Free focus")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(NotchTheme.lavenderInk)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundStyle(NotchTheme.lavenderPaperMuted)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .frame(maxWidth: .infinity)
+                .background(NotchTheme.lavenderPaperPill, in: Capsule())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+
+            Spacer(minLength: 10)
+
+            // Dot-Matrix Digital Countdown Clock
+            DotMatrixClockView(
+                timeString: model.timer.formattedRemaining,
+                dotColor: NotchTheme.lavenderInk
+            )
+            .frame(height: 36)
+
+            Text(statusLabel)
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(NotchTheme.lavenderPaperMuted)
+                .padding(.top, 7)
+
+            // Progress hairline
+            GeometryReader { barGeo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.black.opacity(0.10))
+                        .frame(height: 1.5)
+                    Capsule()
+                        .fill(NotchTheme.lavenderInk.opacity(0.65))
+                        .frame(width: max(0, barGeo.size.width * model.timer.progress), height: 1.5)
+                }
+            }
+            .frame(height: 2)
+            .padding(.horizontal, 14)
+            .padding(.top, 14)
+
+            // Primary Start / Pause + Complete / Reset buttons
+            HStack(spacing: 8) {
+                Button {
+                    model.toggleFocusPlayPause()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: isRunning ? "pause.fill" : "play.fill")
+                            .font(.system(size: 10, weight: .bold))
+                        Text(isRunning ? "Pause" : (model.timer.state == .paused ? "Resume" : "Start"))
+                            .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 7.5)
+                    .background(NotchTheme.lavenderPaperButton, in: Capsule())
+                }
+                .buttonStyle(.plain)
+
+                if linkedTask != nil {
+                    Button {
+                        model.completeActiveFocusTask()
+                    } label: {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(NotchTheme.lavenderInk)
+                            .frame(width: 28, height: 28)
+                            .background(Color.black.opacity(0.10), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Complete linked task and log focus time")
+                } else {
+                    Button {
+                        model.resetFocusTimer()
+                    } label: {
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(NotchTheme.lavenderInk)
+                            .frame(width: 28, height: 28)
+                            .background(Color.black.opacity(0.10), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Reset countdown timer")
+                }
+            }
+            .padding(.top, 14)
+
+            if linkedTask != nil && model.timer.state != .idle {
+                Button {
+                    model.resetFocusTimer()
+                } label: {
+                    Text("Reset")
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .foregroundStyle(NotchTheme.lavenderPaperMuted)
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 6)
+            }
+
+            Spacer(minLength: 10)
+
+            // Footer: Set time + sound mute/selector
+            HStack(spacing: 8) {
+                Menu {
+                    let currentMins = model.effectiveFocusMinutes(for: linkedTask)
+                    ForEach([10, 15, 25, 30, 45, 60, 90], id: \.self) { mins in
+                        Button {
+                            model.setFocusDuration(minutes: mins, for: linkedTask?.id)
+                        } label: {
+                            HStack {
+                                Text("\(mins) minutes")
+                                if currentMins == mins {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                    Divider()
+                    Button("+5 minutes") {
+                        model.setFocusDuration(minutes: currentMins + 5, for: linkedTask?.id)
+                    }
+                    Button("-5 minutes") {
+                        model.setFocusDuration(minutes: max(1, currentMins - 5), for: linkedTask?.id)
+                    }
+                    if linkedTask != nil {
+                        Divider()
+                        Button("Open Full Focus View") {
+                            model.activeTab = .timer
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "line.3.horizontal.decrease")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text("Set time")
+                            .font(.system(size: 10.5, weight: .medium))
+                    }
+                    .foregroundStyle(NotchTheme.lavenderPaperMuted)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Set countdown duration for \(linkedTask?.title ?? "Focus")")
+
+                Spacer()
+
+                Menu {
+                    ForEach(FocusSoundscape.allCases) { sound in
+                        Button {
+                            model.selectSoundscape(sound)
+                        } label: {
+                            HStack {
+                                Text(sound.label)
+                                if model.settings.focusSoundscape == sound {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                    Divider()
+                    Button(model.isAmbientPreviewActive ? "Stop Preview" : "Preview Audio") {
+                        model.toggleAmbientPreview()
+                    }
+                } label: {
+                    Image(systemName: model.settings.focusSoundscape == .none ? "speaker.slash" : "speaker.wave.2")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(NotchTheme.lavenderPaperMuted)
+                        .frame(width: 22, height: 22)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Focus soundscape (\(model.settings.focusSoundscape.label))")
+            }
+        }
+        .padding(11)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(NotchTheme.lavenderPaper, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    // MARK: - Column 3: Warm Matte Sand Yellow Inline Notepad
+
+    private var yellowNotepadCard: some View {
+        let noteIndex = model.selectedNoteIndex
+        let note = noteIndex.map { model.notes[$0] }
+        let noteBody = note?.body ?? ""
+        let wordCount = noteBody
+            .split { $0.isWhitespace || $0.isNewline }
+            .count
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Spacer()
+                Capsule()
+                    .fill(Color.black.opacity(0.16))
+                    .frame(width: 22, height: 3)
+                Spacer()
+            }
+            .padding(.bottom, 2)
+
+            // Header row: icon + Notepad selector + utility actions
+            HStack(spacing: 5) {
+                Menu {
+                    ForEach(model.notes) { entry in
+                        Button {
+                            model.selectedNoteID = entry.id
+                        } label: {
+                            HStack {
+                                Text(entry.title.isEmpty ? "Untitled" : entry.title)
+                                if entry.id == note?.id {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                    Divider()
+                    Button {
+                        model.addNote()
+                        onRequestFocus()
+                        isNotepadFocused = true
+                    } label: {
+                        Label("New Note", systemImage: "plus")
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "square.and.pencil")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(NotchTheme.yellowInk.opacity(0.75))
+                        Text(displayNoteTitle(note))
+                            .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                            .foregroundStyle(NotchTheme.yellowInk)
+                            .lineLimit(1)
+                    }
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+
+                Spacer()
+
+                Menu {
+                    if let note {
+                        Button("Convert Lines to Tasks") {
+                            let added = model.convertNoteLinesToTasks(note.id)
+                            notepadFeedback = added > 0 ? "+\(added) tasks" : "No lines"
+                            Task {
+                                try? await Task.sleep(for: .seconds(1.8))
+                                notepadFeedback = nil
+                            }
+                        }
+                        Button("Copy Note") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(note.body, forType: .string)
+                        }
+                        Divider()
+                    }
+                    Button("New Note") {
+                        model.addNote()
+                        onRequestFocus()
+                        isNotepadFocused = true
+                    }
+                    Button("Open Notes Library") {
+                        model.activeTab = .notes
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(NotchTheme.yellowMuted)
+                        .frame(width: 20, height: 20)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Note actions")
+            }
+
+            HStack(spacing: 6) {
+                Text(Self.fullDateFormatter.string(from: note?.updatedAt ?? Date()))
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(NotchTheme.yellowMuted)
+
+                if let notepadFeedback {
+                    Text(notepadFeedback)
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .foregroundStyle(NotchTheme.yellowInk)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(NotchTheme.yellowPillFill, in: Capsule())
+                }
+            }
+
+            ZStack(alignment: .topLeading) {
+                if noteBody.isEmpty {
+                    Text("Capture quick thoughts, meeting notes, or ideas…")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(NotchTheme.yellowMuted.opacity(0.65))
+                        .padding(.top, 5)
+                        .padding(.leading, 4)
+                        .allowsHitTesting(false)
+                }
+
+                if let note {
+                    TextEditor(
+                        text: Binding(
+                            get: {
+                                if let idx = model.notes.firstIndex(where: { $0.id == note.id }) {
+                                    return model.notes[idx].body
+                                }
+                                return ""
+                            },
+                            set: { newValue in
+                                model.updateNoteBody(note.id, body: newValue)
+                            }
+                        )
+                    )
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(NotchTheme.yellowInk)
+                    .tint(NotchTheme.yellowInk)
+                    .scrollContentBackground(.hidden)
+                    .colorScheme(.light)
+                    .focused($isNotepadFocused)
+                    .onTapGesture {
+                        onRequestFocus()
+                        isAddingFocused = false
+                        isNotepadFocused = true
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            dottedSeparator
+
+            // Word count + voice dictation footer
+            HStack(spacing: 6) {
+                Label("\(wordCount) \(wordCount == 1 ? "word" : "words")", systemImage: "text.alignleft")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(NotchTheme.yellowMuted)
+
+                Spacer()
+
+                Button {
+                    guard let note else { return }
+                    onRequestFocus()
+                    let isCurrentlyRecordingNote: Bool
+                    if case .notepad(let activeID, _) = dictationTarget, activeID == note.id, model.voiceCapture.isRecording {
+                        isCurrentlyRecordingNote = true
+                    } else {
+                        isCurrentlyRecordingNote = false
+                    }
+
+                    if isCurrentlyRecordingNote {
+                        model.voiceCapture.stopRecording()
+                        dictationTarget = nil
+                    } else {
+                        let base = note.body
+                        let prefix = base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            ? ""
+                            : (base.hasSuffix("\n") ? base : base + "\n")
+                        dictationTarget = .notepad(noteID: note.id, baseBody: prefix)
+                        model.voiceCapture.onTranscriptUpdated = { spoken in
+                            model.updateNoteBody(note.id, body: prefix + spoken)
+                        }
+                        Task {
+                            await model.voiceCapture.toggleRecording()
+                        }
+                    }
+                } label: {
+                    let recordingHere: Bool = {
+                        if case .notepad = dictationTarget, model.voiceCapture.isRecording {
+                            return true
+                        }
+                        return false
+                    }()
+                    if recordingHere {
+                        AnimatedWaveformView(
+                            isActive: true,
+                            barColor: NotchTheme.coralAlert,
+                            barWidth: 1.8,
+                            maxHeight: 10
+                        )
+                    } else {
+                        Image(systemName: "mic.fill")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(NotchTheme.yellowMuted)
+                            .frame(width: 20, height: 20)
+                    }
+                }
+                .buttonStyle(.plain)
+                .help("Dictate into Notepad")
+            }
+        }
+        .padding(11)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(NotchTheme.yellowPaper, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func displayNoteTitle(_ note: NoteEntry?) -> String {
+        guard let title = note?.title, !title.isEmpty else { return "Notepad" }
+        if title == "Daily Notepad" || title == "Scratchpad" {
+            return "Notepad"
+        }
+        return title
+    }
+
+    // MARK: - Column 4: Misty Steel-Blue 7-Day Calendar
 
     private var weekDaysWindow: [Date] {
         let cal = Calendar.current
@@ -629,10 +1178,12 @@ struct TodayTabView: View {
         let cal = Calendar.current
         let dayEvents = model.events(on: selectedCalendarDate)
         let dayTimedTasks = model.timedTasks(on: selectedCalendarDate)
+        let now = Date()
+        let heroEventID = dayEvents.first(where: { !$0.isAllDay && $0.endDate > now && $0.meetingURL != nil })?.id
+            ?? dayEvents.first(where: { !$0.isAllDay && $0.endDate > now })?.id
 
-        return VStack(alignment: .leading, spacing: 9) {
-            // Top handle bar + 7-day selector strip for the calendar card
-            VStack(spacing: 7) {
+        return VStack(alignment: .leading, spacing: 8) {
+            VStack(spacing: 6) {
                 Capsule()
                     .fill(Color.black.opacity(0.18))
                     .frame(width: 22, height: 3)
@@ -647,9 +1198,9 @@ struct TodayTabView: View {
                         Button {
                             selectedCalendarDate = day
                         } label: {
-                            VStack(spacing: 3) {
+                            VStack(spacing: 2.5) {
                                 Text(Self.dayInitialFormatter.string(from: day))
-                                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                                    .font(.system(size: 9.5, weight: .medium, design: .rounded))
                                     .foregroundStyle(NotchTheme.steelBlueMuted)
 
                                 ZStack {
@@ -662,14 +1213,14 @@ struct TodayTabView: View {
                                     }
 
                                     Text("\(dayNum)")
-                                        .font(.system(size: 12.5, weight: isSelected ? .bold : .semibold, design: .rounded))
+                                        .font(.system(size: 11.5, weight: isSelected ? .bold : .semibold, design: .rounded))
                                         .foregroundStyle(isSelected ? .white : NotchTheme.steelBlueInk)
                                 }
-                                .frame(width: 26, height: 26)
+                                .frame(width: 23, height: 23)
 
                                 Circle()
                                     .fill(NotchTheme.steelBlueInk.opacity(hasDot ? 0.65 : 0.0))
-                                    .frame(width: 3.5, height: 3.5)
+                                    .frame(width: 3, height: 3)
                             }
                             .frame(maxWidth: .infinity)
                             .contentShape(Rectangle())
@@ -679,31 +1230,30 @@ struct TodayTabView: View {
                 }
             }
 
-            // Optional calendar authorization prompt banner (non-blocking)
             if model.eventKit.calendarAuth == .notDetermined {
-                HStack(spacing: 8) {
-                    Text("Connect Apple Calendar for meetings & Zoom links")
-                        .font(.system(size: 10.5, weight: .medium))
+                HStack(spacing: 6) {
+                    Text("Connect Apple Calendar for meetings")
+                        .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(NotchTheme.steelBlueInk)
                         .lineLimit(1)
                     Spacer()
                     Button("Connect") {
                         Task { _ = await model.eventKit.requestCalendarAccess() }
                     }
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: 9.5, weight: .semibold))
                     .foregroundStyle(.white)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3.5)
                     .background(NotchTheme.steelBlueSelectedCircle, in: Capsule())
                     .buttonStyle(.plain)
                 }
-                .padding(.horizontal, 9)
-                .padding(.vertical, 6)
-                .background(Color.black.opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Color.black.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
             } else if model.eventKit.calendarAuth == .denied {
-                HStack(spacing: 8) {
-                    Text("Calendar permission off in System Settings")
-                        .font(.system(size: 10.5, weight: .medium))
+                HStack(spacing: 6) {
+                    Text("Calendar permission off")
+                        .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(NotchTheme.steelBlueInk)
                     Spacer()
                     Button("Settings") {
@@ -711,19 +1261,18 @@ struct TodayTabView: View {
                             NSWorkspace.shared.open(url)
                         }
                     }
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: 9.5, weight: .semibold))
                     .foregroundStyle(.white)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3.5)
                     .background(NotchTheme.steelBlueSelectedCircle, in: Capsule())
                     .buttonStyle(.plain)
                 }
-                .padding(.horizontal, 9)
-                .padding(.vertical, 6)
-                .background(Color.black.opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Color.black.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
             }
 
-            // Chronological Day Timeline combining Calendar Events + Timed Reminders/Tasks
             if dayEvents.isEmpty && dayTimedTasks.isEmpty {
                 VStack(spacing: 5) {
                     Spacer()
@@ -731,7 +1280,7 @@ struct TodayTabView: View {
                         .font(.system(size: 18))
                         .foregroundStyle(NotchTheme.steelBlueMuted.opacity(0.7))
                     Text("No scheduled meetings or timed reminders on this day")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: 10.5, weight: .medium))
                         .foregroundStyle(NotchTheme.steelBlueMuted)
                         .multilineTextAlignment(.center)
                     Spacer()
@@ -741,14 +1290,73 @@ struct TodayTabView: View {
                 ScrollView(.vertical, showsIndicators: true) {
                     VStack(spacing: 6) {
                         ForEach(buildTimelineEntries(events: dayEvents, tasks: dayTimedTasks)) { entry in
-                            timelineRow(entry)
+                            timelineRow(entry, heroEventID: heroEventID, now: now)
                         }
                     }
                     .padding(.vertical, 1)
                 }
             }
+
+            dottedSeparator
+
+            // Calendar status footer matching screenshot
+            HStack(spacing: 7) {
+                HStack(spacing: 4) {
+                    Image(systemName: model.eventKit.calendarAuth == .authorized ? "checkmark.circle" : "calendar.badge.exclamationmark")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text(model.eventKit.calendarAuth == .authorized ? "Connected" : "Not Connected")
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .foregroundStyle(NotchTheme.steelBlueMuted)
+
+                Spacer()
+
+                Button {
+                    model.eventKit.refreshEvents()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(NotchTheme.steelBlueMuted)
+                }
+                .buttonStyle(.plain)
+                .help("Refresh calendar events")
+
+                Button {
+                    if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.iCal") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(NotchTheme.steelBlueMuted)
+                }
+                .buttonStyle(.plain)
+                .help("Open Apple Calendar")
+
+                Menu {
+                    Button("Refresh Events") {
+                        model.eventKit.refreshEvents()
+                    }
+                    Button("Open Hub Dashboard") {
+                        model.activeTab = .hub
+                    }
+                    if model.settings.syncReminders {
+                        Button("Sync Reminders") {
+                            Task { await model.syncWithReminders() }
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(NotchTheme.steelBlueMuted)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+            }
         }
         .padding(11)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(NotchTheme.steelBluePaper, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
@@ -777,39 +1385,41 @@ struct TodayTabView: View {
     }
 
     @ViewBuilder
-    private func timelineRow(_ entry: TimelineEntry) -> some View {
+    private func timelineRow(_ entry: TimelineEntry, heroEventID: String?, now: Date) -> some View {
         switch entry {
         case .event(let event):
-            HStack(spacing: 8) {
+            let isHero = event.id == heroEventID
+            HStack(alignment: .top, spacing: 6) {
                 if event.isAllDay {
                     Text("All\nday")
-                        .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                        .font(.system(size: 9, weight: .semibold, design: .rounded))
                         .foregroundStyle(NotchTheme.steelBlueMuted)
                         .multilineTextAlignment(.trailing)
-                        .frame(width: 36, alignment: .trailing)
+                        .frame(width: 30, alignment: .trailing)
                 } else {
                     VStack(alignment: .trailing, spacing: 0) {
                         Text(Self.timelineHourFormatter.string(from: event.startDate))
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .font(.system(size: 10.5, weight: .semibold, design: .rounded))
                             .foregroundStyle(NotchTheme.steelBlueInk)
                         Text(Self.timelinePeriodFormatter.string(from: event.startDate))
-                            .font(.system(size: 8.5, weight: .medium))
+                            .font(.system(size: 8, weight: .medium))
                             .foregroundStyle(NotchTheme.steelBlueMuted)
                     }
-                    .frame(width: 36, alignment: .trailing)
+                    .frame(width: 30, alignment: .trailing)
+                    .padding(.top, 2)
                 }
 
-                HStack(spacing: 6) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(event.title)
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(NotchTheme.steelBlueInk)
-                            .lineLimit(1)
+                if isHero {
+                    VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(event.title)
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
 
-                        HStack(spacing: 4) {
-                            Text("\(event.calendarTitle) · \(event.durationMinutes) min")
-                                .font(.system(size: 10))
-                                .foregroundStyle(NotchTheme.steelBlueMuted)
+                            Text("\(event.statusLabel(relativeTo: now)) · \(event.calendarTitle)")
+                                .font(.system(size: 9.5, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.68))
                                 .lineLimit(1)
 
                             if let travelMins = event.travelTimeMinutes, let leaveDate = event.leaveByDate {
@@ -817,83 +1427,141 @@ struct TodayTabView: View {
                                     "\(travelMins)m · Leave \(Self.leaveTimeFormatter.string(from: leaveDate))",
                                     systemImage: "car.fill"
                                 )
-                                .font(.system(size: 9.5, weight: .semibold))
-                                .foregroundStyle(NotchTheme.steelBlueSelectedCircle)
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(NotchTheme.skyWave)
+                            }
+                        }
+
+                        if let meetingURL = event.meetingURL {
+                            HStack(spacing: 6) {
+                                Button {
+                                    model.joinMeeting(url: meetingURL, title: event.title)
+                                } label: {
+                                    Label("Join \(event.meetingServiceLabel ?? "Meet")", systemImage: "video.fill")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 9)
+                                        .padding(.vertical, 4)
+                                        .background(Color.white.opacity(0.14), in: Capsule())
+                                }
+                                .buttonStyle(.plain)
+
+                                Button {
+                                    model.activeTab = .mirror
+                                    model.updateMirrorActivation()
+                                } label: {
+                                    Image(systemName: "person.crop.viewfinder")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(.white.opacity(0.82))
+                                        .frame(width: 24, height: 24)
+                                        .background(Color.white.opacity(0.12), in: Circle())
+                                }
+                                .buttonStyle(.plain)
+                                .help("Pre-call Camera Check")
+
+                                Button {
+                                    _ = model.openOrCreateMeetingNote(title: event.title, date: event.startDate, switchToNotes: false)
+                                    notepadFeedback = "Prep Ready"
+                                    Task {
+                                        try? await Task.sleep(for: .seconds(1.8))
+                                        notepadFeedback = nil
+                                    }
+                                } label: {
+                                    Image(systemName: "note.text")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(.white.opacity(0.82))
+                                        .frame(width: 24, height: 24)
+                                        .background(Color.white.opacity(0.12), in: Circle())
+                                }
+                                .buttonStyle(.plain)
+                                .help("Load Meeting Prep Note into Notepad")
                             }
                         }
                     }
+                    .padding(9)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(NotchTheme.calendarHeroCard, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                } else {
+                    HStack(spacing: 5) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(event.title)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(NotchTheme.steelBlueInk)
+                                .lineLimit(1)
 
-                    Spacer(minLength: 4)
-
-                    if let meetingURL = event.meetingURL {
-                        Button {
-                            _ = model.openOrCreateMeetingNote(title: event.title, date: event.startDate, switchToNotes: true)
-                        } label: {
-                            Image(systemName: "note.text")
-                                .font(.system(size: 10.5, weight: .semibold))
-                                .foregroundStyle(NotchTheme.steelBlueInk.opacity(0.78))
-                                .frame(width: 22, height: 22)
-                                .background(Color.black.opacity(0.08), in: Circle())
+                            Text("\(event.calendarTitle) · \(event.durationMinutes) min")
+                                .font(.system(size: 9.5))
+                                .foregroundStyle(NotchTheme.steelBlueMuted)
+                                .lineLimit(1)
                         }
-                        .buttonStyle(.plain)
-                        .help("Open Meeting Note")
 
-                        Button {
-                            model.joinMeeting(url: meetingURL, title: event.title)
-                        } label: {
-                            Label("Join \(event.meetingServiceLabel ?? "Call")", systemImage: "video.fill")
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(NotchTheme.steelBlueSelectedCircle, in: Capsule())
+                        Spacer(minLength: 2)
+
+                        if let meetingURL = event.meetingURL {
+                            Button {
+                                model.joinMeeting(url: meetingURL, title: event.title)
+                            } label: {
+                                Image(systemName: "video.fill")
+                                    .font(.system(size: 9.5, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 22, height: 22)
+                                    .background(NotchTheme.steelBlueSelectedCircle, in: Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .help("Join \(event.meetingServiceLabel ?? "Call")")
                         }
-                        .buttonStyle(.plain)
                     }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6.5)
+                    .background(NotchTheme.steelBlueRowFill, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .background(NotchTheme.steelBlueRowFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
 
         case .task(let task):
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 if let due = task.dueDate {
                     VStack(alignment: .trailing, spacing: 0) {
                         Text(Self.timelineHourFormatter.string(from: due))
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .font(.system(size: 10.5, weight: .semibold, design: .rounded))
                             .foregroundStyle(NotchTheme.steelBlueInk)
                         Text(Self.timelinePeriodFormatter.string(from: due))
-                            .font(.system(size: 8.5, weight: .medium))
+                            .font(.system(size: 8, weight: .medium))
                             .foregroundStyle(NotchTheme.steelBlueMuted)
                     }
-                    .frame(width: 36, alignment: .trailing)
+                    .frame(width: 30, alignment: .trailing)
+                } else {
+                    Text("Task")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(NotchTheme.steelBlueMuted)
+                        .frame(width: 30, alignment: .trailing)
                 }
 
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(task.title)
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(task.isCompleted ? NotchTheme.steelBlueMuted.opacity(0.65) : NotchTheme.steelBlueInk)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(task.isCompleted ? NotchTheme.steelBlueMuted : NotchTheme.steelBlueInk)
                             .strikethrough(task.isCompleted)
                             .lineLimit(1)
 
-                        Text(task.projectTag.map { "Reminder · #\($0)" } ?? "Reminder")
-                            .font(.system(size: 10))
+                        let sub = task.dueCountdownLabel(relativeTo: now).map { "Due \($0)" }
+                            ?? (task.projectTag.map { "Task · #\($0)" } ?? "Scheduled task")
+                        Text(sub)
+                            .font(.system(size: 9.5))
                             .foregroundStyle(NotchTheme.steelBlueMuted)
                     }
 
-                    Spacer(minLength: 4)
+                    Spacer(minLength: 2)
 
                     if let joinURL = task.detectedMeetingURL {
                         Button {
                             model.joinMeeting(url: joinURL, title: task.title)
                         } label: {
-                            Label("Join \(MeetingLinkExtractor.serviceLabel(for: joinURL))", systemImage: "video.fill")
-                                .font(.system(size: 10, weight: .bold))
+                            Label("Join", systemImage: "video.fill")
+                                .font(.system(size: 9.5, weight: .bold))
                                 .foregroundStyle(.white)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
                                 .background(NotchTheme.steelBlueSelectedCircle, in: Capsule())
                         }
                         .buttonStyle(.plain)
@@ -903,99 +1571,75 @@ struct TodayTabView: View {
                         model.toggleTask(task.id)
                     } label: {
                         Image(systemName: task.isCompleted ? "checkmark.circle.fill" : "circle")
-                            .font(.system(size: 15))
+                            .font(.system(size: 14))
                             .foregroundStyle(task.isCompleted ? NotchTheme.mintComplete : NotchTheme.steelBlueInk.opacity(0.65))
-                            .frame(width: 22, height: 22)
+                            .frame(width: 20, height: 20)
                             .contentShape(Circle())
                     }
                     .buttonStyle(.plain)
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .background(NotchTheme.steelBlueRowFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .padding(.horizontal, 9)
+                .padding(.vertical, 6.5)
+                .background(NotchTheme.steelBlueRowFill, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
             }
         }
     }
+}
 
-    private var focusCompactCard: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 8) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(model.activeFocusTask?.title ?? model.timer.phase.label)
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .foregroundStyle(NotchTheme.lavenderSoft)
-                        .lineLimit(1)
+// MARK: - Crisp 5x7 Dot-Matrix Clock Display
 
-                    HStack(spacing: 6) {
-                        Text(model.timer.formattedRemaining)
-                            .font(.system(size: 17, weight: .bold, design: .monospaced))
-                            .foregroundStyle(.white)
+private struct DotMatrixClockView: View {
+    let timeString: String
+    let dotColor: Color
 
-                        if model.timer.state == .running || model.audioEngine.isPlaying {
-                            AnimatedWaveformView(
-                                isActive: true,
-                                barColor: NotchTheme.skyWave,
-                                barWidth: 2,
-                                maxHeight: 11
-                            )
-                        }
+    private static let glyphs: [Character: [String]] = [
+        "0": ["01110", "10001", "10011", "10101", "11001", "10001", "01110"],
+        "1": ["00100", "01100", "00100", "00100", "00100", "00100", "01110"],
+        "2": ["01110", "10001", "00001", "00110", "01000", "10000", "11111"],
+        "3": ["11110", "00001", "00001", "01110", "00001", "00001", "11110"],
+        "4": ["00010", "00110", "01010", "10010", "11111", "00010", "00010"],
+        "5": ["11111", "10000", "11110", "00001", "00001", "10001", "01110"],
+        "6": ["00110", "01000", "10000", "11110", "10001", "10001", "01110"],
+        "7": ["11111", "00001", "00010", "00100", "01000", "01000", "01000"],
+        "8": ["01110", "10001", "10001", "01110", "10001", "10001", "01110"],
+        "9": ["01110", "10001", "10001", "01111", "00001", "00010", "01100"],
+        ":": ["00", "01", "01", "00", "01", "01", "00"]
+    ]
+
+    var body: some View {
+        Canvas { context, size in
+            let chars = Array(timeString)
+            let colsPerChar: [Int] = chars.map { Self.glyphs[$0]?.first?.count ?? 5 }
+            let charGapCols: CGFloat = 1.6
+            let totalCols = CGFloat(colsPerChar.reduce(0, +)) + charGapCols * CGFloat(max(0, chars.count - 1))
+            let totalRows: CGFloat = 7
+
+            let step = min(size.width / max(1, totalCols), size.height / totalRows)
+            let dotDiameter = max(2.2, step * 0.72)
+            let renderedWidth = totalCols * step
+            let originX = (size.width - renderedWidth) / 2
+            let originY = (size.height - (totalRows * step)) / 2
+
+            var colOffset: CGFloat = 0
+            for (index, ch) in chars.enumerated() {
+                let rows = Self.glyphs[ch] ?? Self.glyphs["0"]!
+                for (rIdx, rowStr) in rows.enumerated() {
+                    for (cIdx, bit) in rowStr.enumerated() where bit == "1" {
+                        let cx = originX + (colOffset + CGFloat(cIdx) + 0.5) * step
+                        let cy = originY + (CGFloat(rIdx) + 0.5) * step
+                        let rect = CGRect(
+                            x: cx - dotDiameter / 2,
+                            y: cy - dotDiameter / 2,
+                            width: dotDiameter,
+                            height: dotDiameter
+                        )
+                        context.fill(Path(ellipseIn: rect), with: .color(dotColor))
                     }
                 }
-
-                Spacer()
-
-                Button {
-                    model.toggleFocusPlayPause()
-                } label: {
-                    Image(systemName: model.timer.state == .running ? "pause.fill" : "play.fill")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.black)
-                        .frame(width: 28, height: 28)
-                        .background(NotchTheme.skyWave, in: Circle())
-                }
-                .buttonStyle(.plain)
-
-                if model.timer.state != .idle {
-                    Button {
-                        model.resetFocusTimer()
-                    } label: {
-                        Image(systemName: "arrow.counterclockwise")
-                            .font(.system(size: 10.5, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.75))
-                            .frame(width: 24, height: 24)
-                            .background(Color.white.opacity(0.09), in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-
-            HStack(spacing: 4) {
-                ForEach(FocusSoundscape.allCases) { sound in
-                    let selected = model.settings.focusSoundscape == sound
-                    Button {
-                        model.selectSoundscape(sound)
-                    } label: {
-                        Text(sound.label)
-                            .font(.system(size: 9.5, weight: .semibold))
-                            .foregroundStyle(selected ? .black : .white.opacity(0.76))
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3)
-                            .background(
-                                Capsule()
-                                    .fill(selected ? NotchTheme.lavenderSoft : Color.white.opacity(0.08))
-                            )
-                    }
-                    .buttonStyle(.plain)
-                }
+                colOffset += CGFloat(colsPerChar[index]) + charGapCols
             }
         }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 9)
-        .background(NotchTheme.lavenderCard, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 15, style: .continuous)
-                .stroke(NotchTheme.lavenderAccent.opacity(0.25), lineWidth: 1)
-        )
+        .accessibilityLabel(timeString)
     }
 }
 

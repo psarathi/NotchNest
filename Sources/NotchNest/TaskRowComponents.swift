@@ -24,9 +24,19 @@ struct TaskActionsMenu: View {
             if !item.isCompleted {
                 Button {
                     model.startFocus(on: item.id)
-                    model.activeTab = .timer
+                    if model.activeTab != .today {
+                        model.activeTab = .timer
+                    }
                 } label: {
                     Label("Focus on Task", systemImage: "play.fill")
+                }
+
+                Menu("Set Countdown") {
+                    ForEach([15, 25, 45, 60, 90], id: \.self) { mins in
+                        Button("\(mins) min") {
+                            model.setFocusDuration(minutes: mins, for: item.id)
+                        }
+                    }
                 }
 
                 Button {
@@ -96,6 +106,7 @@ struct TaskInlineEditorRow: View {
     @Binding var priority: TaskPriority
     @Binding var bucket: TaskBucket
     @Binding var dayKey: String?
+    @Binding var targetMinutes: Int?
     let columns: [WeekPlanColumn]
     let onRequestFocus: () -> Void
     let onSave: () -> Void
@@ -104,6 +115,8 @@ struct TaskInlineEditorRow: View {
 
     let isDarkSurface: Bool
     @FocusState private var isFocused: Bool
+
+    private static let durationOptions: [Int?] = [nil, 15, 25, 45, 60]
 
     private static let shortDayFmt: DateFormatter = {
         let f = DateFormatter()
@@ -181,7 +194,38 @@ struct TaskInlineEditorRow: View {
                 }
             }
 
-            HStack {
+            HStack(spacing: 4) {
+                Text("Timer:")
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(isDarkSurface ? .white.opacity(0.55) : NotchTheme.sageMuted)
+
+                ForEach(Self.durationOptions.indices, id: \.self) { idx in
+                    let option = Self.durationOptions[idx]
+                    let selected = targetMinutes == option
+                    Button {
+                        targetMinutes = option
+                    } label: {
+                        Text(option.map { "\($0)m" } ?? "Auto")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(
+                                selected
+                                    ? .white
+                                    : (isDarkSurface ? .white.opacity(0.68) : NotchTheme.sageInk.opacity(0.75))
+                            )
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule()
+                                    .fill(
+                                        selected
+                                            ? NotchTheme.sageBadgeFill
+                                            : (isDarkSurface ? Color.white.opacity(0.08) : Color.black.opacity(0.08))
+                                    )
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+
                 Spacer()
 
                 Button("Cancel", action: onCancel)

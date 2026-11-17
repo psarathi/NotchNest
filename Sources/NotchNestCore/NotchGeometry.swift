@@ -101,10 +101,10 @@ public struct NotchLayout: Equatable, Sendable {
 }
 
 public enum NotchGeometry {
-    public static let defaultExpandedWidth: CGFloat = 780
-    public static let defaultExpandedHeight: CGFloat = 448
-    public static let wideExpandedWidth: CGFloat = 940
-    public static let wideExpandedHeight: CGFloat = 520
+    public static let defaultExpandedWidth: CGFloat = 940
+    public static let defaultExpandedHeight: CGFloat = 478
+    public static let wideExpandedWidth: CGFloat = 1040
+    public static let wideExpandedHeight: CGFloat = 540
     public static let horizontalMargin: CGFloat = 12
     public static let shadowPaddingHorizontal: CGFloat = 24
     public static let shadowPaddingBottom: CGFloat = 28

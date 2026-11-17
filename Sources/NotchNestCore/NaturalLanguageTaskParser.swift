@@ -8,6 +8,7 @@ public struct ParsedTaskDraft: Equatable, Sendable {
     public var priority: TaskPriority
     public var projectTag: String?
     public var recurrence: TaskRecurrence
+    public var targetMinutes: Int?
     public var hasStructuredMetadata: Bool
 
     public init(
@@ -18,6 +19,7 @@ public struct ParsedTaskDraft: Equatable, Sendable {
         priority: TaskPriority = .normal,
         projectTag: String? = nil,
         recurrence: TaskRecurrence = .none,
+        targetMinutes: Int? = nil,
         hasStructuredMetadata: Bool = false
     ) {
         self.title = title
@@ -27,6 +29,7 @@ public struct ParsedTaskDraft: Equatable, Sendable {
         self.priority = priority
         self.projectTag = projectTag
         self.recurrence = recurrence
+        self.targetMinutes = targetMinutes
         self.hasStructuredMetadata = hasStructuredMetadata
     }
 
@@ -66,6 +69,9 @@ public struct ParsedTaskDraft: Equatable, Sendable {
         }
         if let recurrenceLabel = recurrence.label {
             parts.append(recurrenceLabel)
+        }
+        if let targetMinutes {
+            parts.append("⏱ \(targetMinutes)m")
         }
 
         return "\"\(title)\" planned for \(parts.joined(separator: " · "))"
@@ -109,6 +115,7 @@ public enum NaturalLanguageTaskParser {
         var parsedHour: Int?
         var parsedMinute: Int?
         var relativeDueDate: Date?
+        var targetMinutes: Int?
         var matchedAnything = false
 
         // 1. Hashtags (#Work, #Personal)
@@ -182,6 +189,13 @@ public enum NaturalLanguageTaskParser {
                 matchedAnything = true
                 working.removeSubrange(relRange)
             }
+        }
+
+        // 4b. Target countdown duration ("45m", "for 45 min", "~30m", "(15 min)")
+        if let durMatch = matchTargetDuration(in: working) {
+            targetMinutes = durMatch.minutes
+            matchedAnything = true
+            working.removeSubrange(durMatch.range)
         }
 
         // 5. Day keywords ("inbox", "tomorrow", "today", "18 Nov"/"Nov 18", weekdays)
@@ -287,8 +301,27 @@ public enum NaturalLanguageTaskParser {
             priority: priority,
             projectTag: projectTag,
             recurrence: recurrence,
+            targetMinutes: targetMinutes,
             hasStructuredMetadata: matchedAnything
         )
+    }
+
+    private static func matchTargetDuration(in text: String) -> (minutes: Int, range: Range<String.Index>)? {
+        let nsText = text as NSString
+        guard let regex = try? NSRegularExpression(
+            pattern: #"(?:^|\s)(?:for\s+|~|\()?(\d{1,3})\s*(?:m|min|mins|minute|minutes)\)?(?=\s|$)"#,
+            options: [.caseInsensitive]
+        ),
+        let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: nsText.length)),
+        match.range(at: 1).location != NSNotFound,
+        let fullRange = Range(match.range, in: text) else {
+            return nil
+        }
+        let rawDigits = nsText.substring(with: match.range(at: 1))
+        guard let mins = Int(rawDigits), (1...240).contains(mins) else {
+            return nil
+        }
+        return (mins, fullRange)
     }
 
     private static func normalizeTag(_ raw: String) -> String {

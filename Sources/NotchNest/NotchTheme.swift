@@ -22,12 +22,26 @@ enum NotchTheme {
     static let lavenderAccent = Color(red: 0.61, green: 0.57, blue: 0.75)
     static let lavenderSoft = Color(red: 0.71, green: 0.68, blue: 0.84)
 
+    // Workspace pastel matte lavender Focus card palette
+    static let lavenderPaper = Color(red: 0.710, green: 0.667, blue: 0.753)
+    static let lavenderInk = Color(red: 0.114, green: 0.102, blue: 0.145)
+    static let lavenderPaperMuted = Color(red: 0.30, green: 0.27, blue: 0.36)
+    static let lavenderPaperButton = Color(red: 0.36, green: 0.32, blue: 0.43)
+    static let lavenderPaperPill = Color.black.opacity(0.085)
+
+    // Workspace matte warm sand/yellow Notepad palette
+    static let yellowPaper = Color(red: 0.824, green: 0.761, blue: 0.545)
+    static let yellowInk = Color(red: 0.135, green: 0.118, blue: 0.072)
+    static let yellowMuted = Color(red: 0.36, green: 0.32, blue: 0.21)
+    static let yellowPillFill = Color.black.opacity(0.07)
+
     // Signature misty steel-blue 7-day calendar timeline card tokens
     static let steelBluePaper = Color(red: 0.655, green: 0.725, blue: 0.776) // #A7B9C6
     static let steelBlueInk = Color(red: 0.086, green: 0.125, blue: 0.165)
     static let steelBlueMuted = Color(red: 0.24, green: 0.31, blue: 0.37)
     static let steelBlueRowFill = Color.black.opacity(0.075)
     static let steelBlueSelectedCircle = Color(red: 0.11, green: 0.145, blue: 0.185)
+    static let calendarHeroCard = Color(red: 0.165, green: 0.184, blue: 0.212)
 
     // Functional highlight accents
     static let peachAction = Color(red: 0.93, green: 0.64, blue: 0.36)

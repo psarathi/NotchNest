@@ -15,6 +15,7 @@ struct WeekTabView: View {
     @State private var editPriority: TaskPriority = .normal
     @State private var editBucket: TaskBucket = .today
     @State private var editDayKey: String?
+    @State private var editTargetMinutes: Int?
     @FocusState private var inlineFieldFocused: Bool
 
     private static let dayNumberFormatter: DateFormatter = {
@@ -275,6 +276,7 @@ struct WeekTabView: View {
                 priority: $editPriority,
                 bucket: $editBucket,
                 dayKey: $editDayKey,
+                targetMinutes: $editTargetMinutes,
                 columns: allColumns,
                 onRequestFocus: onRequestFocus,
                 onSave: {
@@ -283,7 +285,9 @@ struct WeekTabView: View {
                         title: editTitle,
                         priority: editPriority,
                         bucket: editBucket,
-                        dayKey: editDayKey
+                        dayKey: editDayKey,
+                        updateTargetMinutes: true,
+                        targetMinutes: editTargetMinutes
                     )
                     editingTaskID = nil
                 },
@@ -418,6 +422,7 @@ struct WeekTabView: View {
         editPriority = item.priority
         editBucket = item.scheduledBucket
         editDayKey = item.scheduledDayKey
+        editTargetMinutes = item.targetMinutes
     }
 
     private func submitInlineTask(into column: WeekPlanColumn) {

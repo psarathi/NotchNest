@@ -159,7 +159,7 @@ struct DiagnosticsOverlayView: View {
                 diagRow("Calendar Events Loaded", "\(model.eventKit.upcomingEvents.count) upcoming (7-day window)")
                 diagRow("Zoom/Call Links Found", "\(model.eventKit.upcomingEvents.filter { $0.meetingURL != nil }.count) event(s)")
                 diagRow("Audio Engine", model.audioEngine.isPlaying ? "Playing (\(model.audioEngine.activeSoundscape.label))" : "Idle (\(model.settings.focusSoundscape.label))")
-                diagRow("Drawer Mode", model.settings.isWideDrawer ? "Wide (940 × 520)" : "Standard (780 × 448)")
+                diagRow("Drawer Mode", model.settings.isWideDrawer ? "Wide (1040 × 540)" : "Standard (940 × 478)")
                 diagRow("Location Auth", locationAuthLabel)
             }
             .padding(10)
