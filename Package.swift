@@ -23,15 +23,18 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("ApplicationServices"),
+                .linkedFramework("AudioToolbox"),
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("Carbon"),
+                .linkedFramework("CoreAudio"),
                 .linkedFramework("CoreLocation"),
                 .linkedFramework("EventKit"),
                 .linkedFramework("IOKit"),
                 .linkedFramework("MapKit"),
                 .linkedFramework("ServiceManagement"),
                 .linkedFramework("Speech"),
-                .linkedFramework("UserNotifications")
+                .linkedFramework("UserNotifications"),
+                .linkedFramework("Vision")
             ]
         ),
         .executableTarget(

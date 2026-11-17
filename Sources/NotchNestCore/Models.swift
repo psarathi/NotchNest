@@ -552,6 +552,8 @@ public enum SnapZone: String, CaseIterable, Sendable, Identifiable {
 
 public enum DropActionKind: String, CaseIterable, Sendable, Identifiable {
     case shelf
+    case copyText
+    case compressImage
     case airDrop
     case zip
     case convertPNG
@@ -565,6 +567,8 @@ public enum DropActionKind: String, CaseIterable, Sendable, Identifiable {
     public var title: String {
         switch self {
         case .shelf: return "Shelf"
+        case .copyText: return "Copy Text"
+        case .compressImage: return "Compress"
         case .airDrop: return "AirDrop"
         case .zip: return "Zip"
         case .convertPNG: return "To PNG"
@@ -578,6 +582,8 @@ public enum DropActionKind: String, CaseIterable, Sendable, Identifiable {
     public var systemImage: String {
         switch self {
         case .shelf: return "tray.and.arrow.down.fill"
+        case .copyText: return "text.viewfinder"
+        case .compressImage: return "arrow.down.right.and.arrow.up.left"
         case .airDrop: return "dot.radiowaves.left.and.right"
         case .zip: return "doc.zipper"
         case .convertPNG: return "photo"
@@ -735,6 +741,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var showTransientLiveActivities: Bool
     public var showMediaInNotch: Bool
     public var preferredMusicPlayer: MusicPlayerPreference
+    public var autoPauseMediaOnJoin: Bool
+    public var createMeetingNoteOnJoin: Bool
     public var hideInScreenCapture: Bool
     public var preventSleepEnabled: Bool
     public var owlAnimationEnabled: Bool
@@ -776,6 +784,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         showTransientLiveActivities: Bool = true,
         showMediaInNotch: Bool = true,
         preferredMusicPlayer: MusicPlayerPreference = .automatic,
+        autoPauseMediaOnJoin: Bool = true,
+        createMeetingNoteOnJoin: Bool = false,
         hideInScreenCapture: Bool = false,
         preventSleepEnabled: Bool = false,
         owlAnimationEnabled: Bool = true,
@@ -816,6 +826,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.showTransientLiveActivities = showTransientLiveActivities
         self.showMediaInNotch = showMediaInNotch
         self.preferredMusicPlayer = preferredMusicPlayer
+        self.autoPauseMediaOnJoin = autoPauseMediaOnJoin
+        self.createMeetingNoteOnJoin = createMeetingNoteOnJoin
         self.hideInScreenCapture = hideInScreenCapture
         self.preventSleepEnabled = preventSleepEnabled
         self.owlAnimationEnabled = owlAnimationEnabled
@@ -858,6 +870,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case showTransientLiveActivities
         case showMediaInNotch
         case preferredMusicPlayer
+        case autoPauseMediaOnJoin
+        case createMeetingNoteOnJoin
         case hideInScreenCapture
         case preventSleepEnabled
         case owlAnimationEnabled
@@ -901,6 +915,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         showTransientLiveActivities = try c.decodeIfPresent(Bool.self, forKey: .showTransientLiveActivities) ?? true
         showMediaInNotch = try c.decodeIfPresent(Bool.self, forKey: .showMediaInNotch) ?? true
         preferredMusicPlayer = try c.decodeIfPresent(MusicPlayerPreference.self, forKey: .preferredMusicPlayer) ?? .automatic
+        autoPauseMediaOnJoin = try c.decodeIfPresent(Bool.self, forKey: .autoPauseMediaOnJoin) ?? true
+        createMeetingNoteOnJoin = try c.decodeIfPresent(Bool.self, forKey: .createMeetingNoteOnJoin) ?? false
         hideInScreenCapture = try c.decodeIfPresent(Bool.self, forKey: .hideInScreenCapture) ?? false
         preventSleepEnabled = try c.decodeIfPresent(Bool.self, forKey: .preventSleepEnabled) ?? false
         owlAnimationEnabled = try c.decodeIfPresent(Bool.self, forKey: .owlAnimationEnabled) ?? true

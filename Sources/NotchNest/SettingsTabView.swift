@@ -144,6 +144,8 @@ struct SettingsTabView: View {
                 }
             ))
             Toggle("Timer completion chime", isOn: $model.settings.soundEnabled)
+            Toggle("Pause music when joining calls", isOn: $model.settings.autoPauseMediaOnJoin)
+            Toggle("Create meeting note on Join", isOn: $model.settings.createMeetingNoteOnJoin)
             Toggle("20-20-20 eye break reminder", isOn: $model.settings.eyeBreakReminderEnabled)
 
             HStack(spacing: 6) {

@@ -183,7 +183,7 @@ public enum NotchGeometry {
             return inBottomButtonRow || inRightDismiss
         }
         if hasMediaControls {
-            let controlsWidth = min(96, max(70, hitRect.width * 0.44))
+            let controlsWidth = min(116, max(78, hitRect.width * 0.48))
             return point.x >= hitRect.maxX - controlsWidth
         }
         return false

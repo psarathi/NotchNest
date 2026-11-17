@@ -343,7 +343,7 @@ struct WeekTabView: View {
                             }
                             if let joinURL = item.detectedMeetingURL {
                                 Button {
-                                    NSWorkspace.shared.open(joinURL)
+                                    model.joinMeeting(url: joinURL, title: item.title)
                                 } label: {
                                     Label("Join \(MeetingLinkExtractor.serviceLabel(for: joinURL))", systemImage: "video.fill")
                                         .font(.system(size: 9, weight: .bold))

@@ -452,7 +452,7 @@ struct TodayTabView: View {
                             }
                             if let joinURL = item.detectedMeetingURL {
                                 Button {
-                                    NSWorkspace.shared.open(joinURL)
+                                    model.joinMeeting(url: joinURL, title: item.title)
                                 } label: {
                                     Label("Join \(MeetingLinkExtractor.serviceLabel(for: joinURL))", systemImage: "video.fill")
                                         .font(.system(size: 9.5, weight: .bold))
@@ -802,7 +802,19 @@ struct TodayTabView: View {
 
                     if let meetingURL = event.meetingURL {
                         Button {
-                            NSWorkspace.shared.open(meetingURL)
+                            _ = model.openOrCreateMeetingNote(title: event.title, date: event.startDate, switchToNotes: true)
+                        } label: {
+                            Image(systemName: "note.text")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundStyle(NotchTheme.steelBlueInk.opacity(0.78))
+                                .frame(width: 22, height: 22)
+                                .background(Color.black.opacity(0.08), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open Meeting Note")
+
+                        Button {
+                            model.joinMeeting(url: meetingURL, title: event.title)
                         } label: {
                             Label("Join \(event.meetingServiceLabel ?? "Call")", systemImage: "video.fill")
                                 .font(.system(size: 10, weight: .bold))
@@ -850,7 +862,7 @@ struct TodayTabView: View {
 
                     if let joinURL = task.detectedMeetingURL {
                         Button {
-                            NSWorkspace.shared.open(joinURL)
+                            model.joinMeeting(url: joinURL, title: task.title)
                         } label: {
                             Label("Join \(MeetingLinkExtractor.serviceLabel(for: joinURL))", systemImage: "video.fill")
                                 .font(.system(size: 10, weight: .bold))

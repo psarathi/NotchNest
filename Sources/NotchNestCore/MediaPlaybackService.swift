@@ -9,6 +9,8 @@ public struct NowPlayingInfo: Equatable, Sendable {
     public var album: String
     public var isPlaying: Bool
     public var artworkData: Data?
+    public var elapsedSeconds: Double?
+    public var durationSeconds: Double?
 
     public init(
         appName: String,
@@ -16,7 +18,9 @@ public struct NowPlayingInfo: Equatable, Sendable {
         artist: String,
         album: String = "",
         isPlaying: Bool,
-        artworkData: Data? = nil
+        artworkData: Data? = nil,
+        elapsedSeconds: Double? = nil,
+        durationSeconds: Double? = nil
     ) {
         self.appName = appName
         self.title = title
@@ -24,6 +28,13 @@ public struct NowPlayingInfo: Equatable, Sendable {
         self.album = album
         self.isPlaying = isPlaying
         self.artworkData = artworkData
+        self.elapsedSeconds = elapsedSeconds
+        self.durationSeconds = durationSeconds
+    }
+
+    public var progressFraction: Double? {
+        guard let elapsedSeconds, let durationSeconds, durationSeconds > 0 else { return nil }
+        return min(1.0, max(0.0, elapsedSeconds / durationSeconds))
     }
 }
 
@@ -32,6 +43,7 @@ public struct NowPlayingInfo: Equatable, Sendable {
 @Observable
 public final class MediaPlaybackService {
     public private(set) var currentTrack: NowPlayingInfo?
+    public private(set) var lastPositionSampleDate: Date = Date()
     public private(set) var automationError: String?
     public private(set) var youTubeMusicNeedsJSHint: Bool = false
     public var preferredPlayer: MusicPlayerPreference = .automatic {
@@ -249,6 +261,11 @@ public final class MediaPlaybackService {
         sendTransportCommand(.playPause)
     }
 
+    public func pauseIfPlaying() {
+        guard currentTrack?.isPlaying == true else { return }
+        sendTransportCommand(.pause)
+    }
+
     public func nextTrack() {
         sendTransportCommand(.next)
     }
@@ -257,8 +274,55 @@ public final class MediaPlaybackService {
         sendTransportCommand(.previous)
     }
 
+    public func seek(to seconds: Double) {
+        let clamped = max(0, seconds)
+        let runningBundleIDs = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
+        let isYTM = currentTrack?.appName == "YouTube Music" || preferredPlayer == .youTubeMusic
+
+        if var track = currentTrack {
+            track.elapsedSeconds = clamped
+            currentTrack = track
+            lastPositionSampleDate = Date()
+        }
+
+        if isYTM {
+            let chromeRunning = runningBundleIDs.contains("com.google.Chrome")
+            let safariRunning = runningBundleIDs.contains("com.apple.Safari")
+            let js = "(() => { const v = document.querySelector('video'); if (v && Number.isFinite(v.duration)) { v.currentTime = \(clamped); return 'ok'; } return ''; })()"
+            Task.detached(priority: .userInitiated) { [weak self] in
+                _ = Self.runBrowserJS(js, chromeRunning: chromeRunning, safariRunning: safariRunning)
+                try? await Task.sleep(for: .milliseconds(180))
+                await MainActor.run { [weak self] in
+                    self?.refreshNowPlaying()
+                }
+            }
+            return
+        }
+
+        let targetApp: String?
+        if preferredPlayer == .spotify
+            || currentTrack?.appName == "Spotify"
+            || (preferredPlayer == .automatic && !runningBundleIDs.contains("com.apple.Music") && runningBundleIDs.contains("com.spotify.client")) {
+            targetApp = runningBundleIDs.contains("com.spotify.client") ? "Spotify" : nil
+        } else {
+            targetApp = runningBundleIDs.contains("com.apple.Music") ? "Music" : nil
+        }
+        guard let targetApp else { return }
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let script = NSAppleScript(source: "tell application \"\(targetApp)\" to set player position to \(clamped)")
+            var err: NSDictionary?
+            script?.executeAndReturnError(&err)
+            try? await Task.sleep(for: .milliseconds(180))
+            await MainActor.run { [weak self] in
+                self?.refreshNowPlaying()
+            }
+        }
+    }
+
     private enum TransportAction: String, Sendable {
         case playPause
+        case pause
         case next
         case previous
     }
@@ -277,8 +341,16 @@ public final class MediaPlaybackService {
                   existing.artist == resolved.artist {
             resolved.artworkData = existing.artworkData
         }
+        if resolved.elapsedSeconds == nil,
+           let existing = currentTrack,
+           existing.title == resolved.title,
+           existing.artist == resolved.artist {
+            resolved.elapsedSeconds = existing.elapsedSeconds
+            resolved.durationSeconds = existing.durationSeconds
+        }
 
         currentTrack = resolved
+        lastPositionSampleDate = Date()
         let key = "\(resolved.appName)|\(resolved.title)|\(resolved.artist)"
         let becamePlaying = resolved.isPlaying && (!wasPlayingLastSample || key != lastNotifiedTrackKey)
         wasPlayingLastSample = resolved.isPlaying
@@ -341,9 +413,12 @@ public final class MediaPlaybackService {
                     safariRunning: safariRunning
                 )
                 if !handledByJS {
+                    if action == .pause {
+                        return
+                    }
                     let keyCode: Int32
                     switch action {
-                    case .playPause: keyCode = 16 // NX_KEYTYPE_PLAY
+                    case .playPause, .pause: keyCode = 16 // NX_KEYTYPE_PLAY
                     case .next: keyCode = 17      // NX_KEYTYPE_NEXT
                     case .previous: keyCode = 18  // NX_KEYTYPE_PREVIOUS
                     }
@@ -369,14 +444,17 @@ public final class MediaPlaybackService {
         }
 
         guard let targetApp else {
-            let keyCode: Int32 = (action == .playPause) ? 16 : (action == .next ? 17 : 18)
-            Self.postHardwareMediaKey(keyCode)
+            if action != .pause {
+                let keyCode: Int32 = (action == .playPause) ? 16 : (action == .next ? 17 : 18)
+                Self.postHardwareMediaKey(keyCode)
+            }
             return
         }
 
         let command: String
         switch action {
         case .playPause: command = "playpause"
+        case .pause: command = "pause"
         case .next: command = "next track"
         case .previous: command = "previous track"
         }
@@ -472,7 +550,7 @@ public final class MediaPlaybackService {
     }
 
     nonisolated private static func queryYouTubeMusicInChrome(fallbackPlaying: Bool) -> MediaQueryOutcome {
-        let js = "(() => { const m = navigator.mediaSession && navigator.mediaSession.metadata; const p = (navigator.mediaSession && navigator.mediaSession.playbackState) || ''; const v = document.querySelector('video'); const playing = p === 'playing' || (!!v && !v.paused && !v.ended); const titleEl = document.querySelector('ytmusic-player-bar .title'); const bylineEl = document.querySelector('ytmusic-player-bar .byline'); const imgEl = document.querySelector('ytmusic-player-bar img.image'); const t = (m && m.title) || (titleEl && titleEl.textContent && titleEl.textContent.trim()) || ''; const a = (m && m.artist) || (bylineEl && bylineEl.textContent && bylineEl.textContent.trim()) || ''; const alb = (m && m.album) || ''; const art = (m && m.artwork && m.artwork.length) ? m.artwork[m.artwork.length - 1].src : ((imgEl && imgEl.src) || ''); return JSON.stringify({playing, t, a, alb, art}); })()"
+        let js = "(() => { const m = navigator.mediaSession && navigator.mediaSession.metadata; const p = (navigator.mediaSession && navigator.mediaSession.playbackState) || ''; const v = document.querySelector('video'); const playing = p === 'playing' || (!!v && !v.paused && !v.ended); const titleEl = document.querySelector('ytmusic-player-bar .title'); const bylineEl = document.querySelector('ytmusic-player-bar .byline'); const imgEl = document.querySelector('ytmusic-player-bar img.image'); const t = (m && m.title) || (titleEl && titleEl.textContent && titleEl.textContent.trim()) || ''; const a = (m && m.artist) || (bylineEl && bylineEl.textContent && bylineEl.textContent.trim()) || ''; const alb = (m && m.album) || ''; const art = (m && m.artwork && m.artwork.length) ? m.artwork[m.artwork.length - 1].src : ((imgEl && imgEl.src) || ''); const pos = (v && Number.isFinite(v.currentTime)) ? v.currentTime : null; const dur = (v && Number.isFinite(v.duration)) ? v.duration : null; return JSON.stringify({playing, t, a, alb, art, pos, dur}); })()"
         let source = """
         tell application "Google Chrome"
             repeat with w in windows
@@ -494,7 +572,7 @@ public final class MediaPlaybackService {
     }
 
     nonisolated private static func queryYouTubeMusicInSafari(fallbackPlaying: Bool) -> MediaQueryOutcome {
-        let js = "(() => { const m = navigator.mediaSession && navigator.mediaSession.metadata; const p = (navigator.mediaSession && navigator.mediaSession.playbackState) || ''; const v = document.querySelector('video'); const playing = p === 'playing' || (!!v && !v.paused && !v.ended); const titleEl = document.querySelector('ytmusic-player-bar .title'); const bylineEl = document.querySelector('ytmusic-player-bar .byline'); const imgEl = document.querySelector('ytmusic-player-bar img.image'); const t = (m && m.title) || (titleEl && titleEl.textContent && titleEl.textContent.trim()) || ''; const a = (m && m.artist) || (bylineEl && bylineEl.textContent && bylineEl.textContent.trim()) || ''; const alb = (m && m.album) || ''; const art = (m && m.artwork && m.artwork.length) ? m.artwork[m.artwork.length - 1].src : ((imgEl && imgEl.src) || ''); return JSON.stringify({playing, t, a, alb, art}); })()"
+        let js = "(() => { const m = navigator.mediaSession && navigator.mediaSession.metadata; const p = (navigator.mediaSession && navigator.mediaSession.playbackState) || ''; const v = document.querySelector('video'); const playing = p === 'playing' || (!!v && !v.paused && !v.ended); const titleEl = document.querySelector('ytmusic-player-bar .title'); const bylineEl = document.querySelector('ytmusic-player-bar .byline'); const imgEl = document.querySelector('ytmusic-player-bar img.image'); const t = (m && m.title) || (titleEl && titleEl.textContent && titleEl.textContent.trim()) || ''; const a = (m && m.artist) || (bylineEl && bylineEl.textContent && bylineEl.textContent.trim()) || ''; const alb = (m && m.album) || ''; const art = (m && m.artwork && m.artwork.length) ? m.artwork[m.artwork.length - 1].src : ((imgEl && imgEl.src) || ''); const pos = (v && Number.isFinite(v.currentTime)) ? v.currentTime : null; const dur = (v && Number.isFinite(v.duration)) ? v.duration : null; return JSON.stringify({playing, t, a, alb, art, pos, dur}); })()"
         let source = """
         tell application "Safari"
             repeat with w in windows
@@ -554,11 +632,21 @@ public final class MediaPlaybackService {
         switch action {
         case .playPause:
             js = "(() => { const btn = document.querySelector('#play-pause-button'); if (btn) { btn.click(); return 'ok'; } const v = document.querySelector('video'); if (v) { if (v.paused) v.play(); else v.pause(); return 'ok'; } return ''; })()"
+        case .pause:
+            js = "(() => { const v = document.querySelector('video'); if (v && !v.paused) { const btn = document.querySelector('#play-pause-button'); if (btn) btn.click(); else v.pause(); return 'ok'; } return ''; })()"
         case .next:
             js = "(() => { const btn = document.querySelector('.next-button'); if (btn) { btn.click(); return 'ok'; } return ''; })()"
         case .previous:
             js = "(() => { const btn = document.querySelector('.previous-button'); if (btn) { btn.click(); return 'ok'; } return ''; })()"
         }
+        return runBrowserJS(js, chromeRunning: chromeRunning, safariRunning: safariRunning)
+    }
+
+    nonisolated private static func runBrowserJS(
+        _ js: String,
+        chromeRunning: Bool,
+        safariRunning: Bool
+    ) -> Bool {
 
         if chromeRunning {
             let src = """
@@ -640,7 +728,13 @@ public final class MediaPlaybackService {
             set trackArtist to artist of current track
             set trackAlbum to album of current track
             set isPlayingNow to (player state is playing)
-            return {isPlayingNow, trackName, trackArtist, trackAlbum}
+            set posSec to 0
+            set durSec to 0
+            try
+                set posSec to player position
+                set durSec to duration of current track
+            end try
+            return {isPlayingNow, trackName, trackArtist, trackAlbum, "", posSec, durSec}
         end tell
         """
         return runListAppleScript(source, appName: "Music")
@@ -659,8 +753,14 @@ public final class MediaPlaybackService {
             try
                 set trackArt to artwork url of current track
             end try
+            set posSec to 0
+            set durMs to 0
+            try
+                set posSec to player position
+                set durMs to duration of current track
+            end try
             set isPlayingNow to (player state is playing)
-            return {isPlayingNow, trackName, trackArtist, trackAlbum, trackArt}
+            return {isPlayingNow, trackName, trackArtist, trackAlbum, trackArt, posSec, durMs}
         end tell
         """
         return runListAppleScript(source, appName: "Spotify")
@@ -703,13 +803,19 @@ public final class MediaPlaybackService {
                 let album = (obj["alb"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 let artURL = (obj["art"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
                 let playing = obj["playing"] as? Bool ?? false
+                let rawPos = obj["pos"] as? Double
+                let rawDur = obj["dur"] as? Double
+                let validDur = (rawDur ?? 0) > 0 ? rawDur : nil
+                let validPos = (validDur != nil && (rawPos ?? -1) >= 0) ? rawPos : nil
                 return (
                     NowPlayingInfo(
                         appName: "YouTube Music",
                         title: title,
                         artist: cleanedArtist,
                         album: album,
-                        isPlaying: playing
+                        isPlaying: playing,
+                        elapsedSeconds: validPos,
+                        durationSeconds: validDur
                     ),
                     (artURL?.isEmpty == false) ? artURL : nil,
                     true
@@ -765,6 +871,17 @@ public final class MediaPlaybackService {
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let artworkURL = (descriptor.numberOfItems >= 5 ? descriptor.atIndex(5)?.stringValue : nil)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawPos = descriptor.numberOfItems >= 6 ? descriptor.atIndex(6)?.doubleValue : nil
+        let rawDur = descriptor.numberOfItems >= 7 ? descriptor.atIndex(7)?.doubleValue : nil
+        let normalizedDur: Double? = {
+            guard let rawDur, rawDur > 0 else { return nil }
+            // Spotify's AppleScript duration property reports milliseconds despite its .sdef wording.
+            return appName == "Spotify" ? rawDur / 1000.0 : rawDur
+        }()
+        let validPos: Double? = {
+            guard normalizedDur != nil, let rawPos, rawPos >= 0 else { return nil }
+            return rawPos
+        }()
 
         guard !title.isEmpty else { return nil }
         return (
@@ -773,7 +890,9 @@ public final class MediaPlaybackService {
                 title: title,
                 artist: artist,
                 album: album,
-                isPlaying: isPlaying
+                isPlaying: isPlaying,
+                elapsedSeconds: validPos,
+                durationSeconds: normalizedDur
             ),
             (artworkURL?.isEmpty == false) ? artworkURL : nil
         )

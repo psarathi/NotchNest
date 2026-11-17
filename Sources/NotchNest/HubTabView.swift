@@ -42,6 +42,7 @@ struct HubTabView: View {
                 model.devHubService.refreshAll(settings: model.settings)
             }
             model.snapService.refreshTrustStatus()
+            model.systemService.refreshAudioRouting()
         }
         .onChange(of: model.selectedHubSection) { _, newValue in
             if newValue == .devAI {
@@ -200,6 +201,48 @@ struct HubTabView: View {
                 )
             }
 
+            if let duration = track?.durationSeconds, duration > 0 {
+                TimelineView(.periodic(from: .now, by: 1.0)) { context in
+                    let baseElapsed = track?.elapsedSeconds ?? 0
+                    let liveDelta = (track?.isPlaying == true)
+                        ? max(0, context.date.timeIntervalSince(model.mediaService.lastPositionSampleDate))
+                        : 0
+                    let elapsed = min(duration, max(0, baseElapsed + liveDelta))
+                    let frac = min(1.0, max(0.0, elapsed / duration))
+
+                    VStack(spacing: 3) {
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                Capsule()
+                                    .fill(Color.white.opacity(0.11))
+                                Capsule()
+                                    .fill(NotchTheme.peachAction)
+                                    .frame(width: max(6, geo.size.width * frac))
+                            }
+                            .frame(height: 5)
+                            .frame(maxHeight: .infinity, alignment: .center)
+                            .contentShape(Rectangle())
+                            .gesture(
+                                DragGesture(minimumDistance: 0)
+                                    .onEnded { value in
+                                        let ratio = min(1.0, max(0.0, value.location.x / max(1, geo.size.width)))
+                                        model.mediaService.seek(to: ratio * duration)
+                                    }
+                            )
+                        }
+                        .frame(height: 11)
+
+                        HStack {
+                            Text(formatMediaTime(elapsed))
+                            Spacer()
+                            Text(formatMediaTime(duration))
+                        }
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.48))
+                    }
+                }
+            }
+
             HStack(spacing: 8) {
                 Button {
                     model.mediaService.previousTrack()
@@ -304,6 +347,8 @@ struct HubTabView: View {
                     .foregroundStyle(.white.opacity(0.48))
                     .lineLimit(2)
             }
+
+            audioOutputStrip
         }
         .padding(11)
         .background(NotchTheme.cardSurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -311,6 +356,76 @@ struct HubTabView: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(Color.white.opacity(0.08), lineWidth: 1)
         )
+    }
+
+    private var audioOutputStrip: some View {
+        let activeOut = model.systemService.outputDevices.first(where: \.isDefault)
+        return HStack(spacing: 7) {
+            Menu {
+                if model.systemService.outputDevices.isEmpty {
+                    Text("No audio outputs detected")
+                } else {
+                    ForEach(model.systemService.outputDevices) { dev in
+                        Button {
+                            model.systemService.selectOutputDevice(dev.id)
+                        } label: {
+                            if dev.isDefault {
+                                Label(dev.name, systemImage: "checkmark")
+                            } else {
+                                Text(dev.name)
+                            }
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: activeOut?.systemImage ?? "hifispeaker.fill")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(NotchTheme.skyWave)
+                    Text(activeOut?.name ?? "Audio Output")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.75))
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3.5)
+                .background(Color.white.opacity(0.06), in: Capsule())
+            }
+            .menuStyle(.borderlessButton)
+            .frame(maxWidth: 145, alignment: .leading)
+
+            Spacer(minLength: 4)
+
+            Button {
+                model.systemService.toggleSystemMute()
+            } label: {
+                Image(systemName: model.systemService.isSystemMuted || model.systemService.systemVolume == 0
+                    ? "speaker.slash.fill"
+                    : "speaker.wave.2.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(model.systemService.isSystemMuted ? NotchTheme.coralAlert : .white.opacity(0.75))
+            }
+            .buttonStyle(.plain)
+
+            Slider(
+                value: Binding(
+                    get: { model.systemService.systemVolume },
+                    set: { model.systemService.setSystemVolume($0) }
+                ),
+                in: 0...1
+            )
+            .controlSize(.mini)
+            .tint(NotchTheme.sagePaper)
+            .frame(width: 78)
+        }
+        .padding(.top, 2)
+    }
+
+    private func formatMediaTime(_ seconds: Double) -> String {
+        let total = max(0, Int(floor(seconds)))
+        let mins = total / 60
+        let secs = total % 60
+        return String(format: "%d:%02d", mins, secs)
     }
 
     private var weatherBentoCard: some View {

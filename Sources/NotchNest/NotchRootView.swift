@@ -184,6 +184,19 @@ struct NotchRootView: View {
         } else if let track {
             HStack(spacing: 5) {
                 if model.isHoveringNotch {
+                    if layout.collapsedSize.width >= 200 {
+                        Button {
+                            model.mediaService.previousTrack()
+                        } label: {
+                            Image(systemName: "backward.fill")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(.white.opacity(0.88))
+                                .frame(width: 18, height: 18)
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+
                     Button {
                         model.mediaService.togglePlayPause()
                     } label: {
@@ -407,7 +420,7 @@ struct NotchRootView: View {
 
                     if let joinURL {
                         Button {
-                            NSWorkspace.shared.open(joinURL)
+                            model.joinMeeting(url: joinURL, title: title)
                         } label: {
                             Label(joinTitle, systemImage: "video.fill")
                                 .font(.system(size: 10, weight: .bold, design: .rounded))
@@ -417,6 +430,33 @@ struct NotchRootView: View {
                                 .background(NotchTheme.peachAction, in: Capsule())
                         }
                         .buttonStyle(.plain)
+
+                        Button {
+                            _ = model.openOrCreateMeetingNote(title: title, switchToNotes: true)
+                            onExpand()
+                        } label: {
+                            Image(systemName: "note.text")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.88))
+                                .frame(width: 22, height: 22)
+                                .background(Color.white.opacity(0.14), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open Meeting Prep Note")
+
+                        Button {
+                            model.activeTab = .mirror
+                            model.updateMirrorActivation()
+                            onExpand()
+                        } label: {
+                            Image(systemName: "person.crop.viewfinder")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(NotchTheme.skyWave)
+                                .frame(width: 22, height: 22)
+                                .background(Color.white.opacity(0.14), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Pre-Call Camera Check")
                     } else {
                         Button {
                             model.completeActiveNudge()

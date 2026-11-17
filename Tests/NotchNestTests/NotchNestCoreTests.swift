@@ -596,4 +596,93 @@ struct NotchNestCoreTests {
             hasLiveActivity: true
         ))
     }
+
+    @Test("Drop actions run Vision OCR text extraction and image compression")
+    func ocrAndImageCompression() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NotchNestPhase1DropTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // Render high-contrast text onto an oversized 2200x600 bitmap for both OCR & Compress tests
+        let width = 2200
+        let height = 600
+        let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        )!
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSColor.white.setFill()
+        NSRect(x: 0, y: 0, width: width, height: height).fill()
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.boldSystemFont(ofSize: 160),
+            .foregroundColor: NSColor.black
+        ]
+        NSString(string: "NOTCHNEST").draw(at: NSPoint(x: 180, y: 200), withAttributes: attrs)
+        NSGraphicsContext.restoreGraphicsState()
+
+        let pngURL = tempDir.appendingPathComponent("ocr-sample.png")
+        try rep.representation(using: .png, properties: [:])!.write(to: pngURL)
+
+        let recognized = try DropActionExecutor.recognizeText(from: [pngURL])
+        #expect(recognized.uppercased().contains("NOTCHNEST"))
+
+        let compressed = try DropActionExecutor.compressImages([pngURL], maxDimension: 1200, jpegQuality: 0.72)
+        #expect(compressed.outputs.count == 1)
+        #expect(FileManager.default.fileExists(atPath: compressed.outputs[0].path))
+        #expect(compressed.compressedBytes > 0)
+        #expect(compressed.outputs[0].lastPathComponent.contains("-compressed"))
+    }
+
+    @Test("Meeting handoff pauses ambient audio, creates deduplicated prep notes, and tracks media timing")
+    @MainActor
+    func meetingHandoffAndMediaTiming() {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NotchNestHandoffTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let model = NotchNestModel(persistence: PersistenceStore(baseDirectory: tempDir), enableSystemIntegrations: false)
+        defer { model.shutdown() }
+
+        model.selectSoundscape(.rain)
+        #expect(model.isAmbientPreviewActive)
+
+        let note1 = model.openOrCreateMeetingNote(title: "Design Review", switchToNotes: false)
+        let note2 = model.openOrCreateMeetingNote(title: "Design Review", switchToNotes: false)
+        #expect(note1.id == note2.id)
+        #expect(note1.body.contains("## Agenda"))
+
+        model.prepareMeetingHandoff(title: "Sprint Sync", createNote: true)
+        #expect(!model.isAmbientPreviewActive)
+        #expect(model.notes.contains(where: { $0.title.contains("Sprint Sync") }))
+
+        // Spotify millisecond duration normalization vs Apple Music seconds
+        let spotifyList = NSAppleEventDescriptor.list()
+        spotifyList.insert(NSAppleEventDescriptor(boolean: true), at: 1)
+        spotifyList.insert(NSAppleEventDescriptor(string: "Track"), at: 2)
+        spotifyList.insert(NSAppleEventDescriptor(string: "Artist"), at: 3)
+        spotifyList.insert(NSAppleEventDescriptor(string: "Album"), at: 4)
+        spotifyList.insert(NSAppleEventDescriptor(string: ""), at: 5)
+        spotifyList.insert(NSAppleEventDescriptor(double: 120.0), at: 6)
+        spotifyList.insert(NSAppleEventDescriptor(double: 240000.0), at: 7)
+        let parsedSpotify = MediaPlaybackService.parseAppleScriptDescriptor(spotifyList, appName: "Spotify")
+        #expect(parsedSpotify?.info.elapsedSeconds == 120.0)
+        #expect(parsedSpotify?.info.durationSeconds == 240.0)
+        #expect(parsedSpotify?.info.progressFraction == 0.5)
+
+        let ytmJSON = #"{"playing":true,"t":"Clip","a":"Creator","alb":"","art":"","pos":30.0,"dur":120.0}"#
+        let parsedYTM = MediaPlaybackService.parseYouTubeMusicPayload(tabTitle: "Clip - YouTube Music", jsJSON: ytmJSON)
+        #expect(parsedYTM?.info.elapsedSeconds == 30.0)
+        #expect(parsedYTM?.info.durationSeconds == 120.0)
+        #expect(parsedYTM?.info.progressFraction == 0.25)
+    }
 }

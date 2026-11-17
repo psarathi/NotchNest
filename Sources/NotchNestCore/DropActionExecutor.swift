@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Vision
 
 public enum DropActionExecutor {
     @MainActor
@@ -16,6 +17,36 @@ public enum DropActionExecutor {
             return urls.count == 1
                 ? "Added \(urls[0].lastPathComponent) to Clips"
                 : "Added \(urls.count) items to Clips"
+
+        case .copyText:
+            do {
+                let extracted = try await Task.detached(priority: .userInitiated) {
+                    try recognizeText(from: urls)
+                }.value
+                guard !extracted.isEmpty else {
+                    return "No readable text found in image."
+                }
+                let pb = NSPasteboard.general
+                pb.clearContents()
+                pb.setString(extracted, forType: .string)
+                let lineCount = extracted.components(separatedBy: .newlines).filter { !$0.isEmpty }.count
+                return "Copied \(lineCount) line(s) of text to clipboard"
+            } catch {
+                return "OCR failed: \(error.localizedDescription)"
+            }
+
+        case .compressImage:
+            do {
+                let summary = try await Task.detached(priority: .userInitiated) {
+                    try compressImages(urls)
+                }.value
+                onAddToShelf(summary.outputs)
+                let before = ByteCountFormatter.string(fromByteCount: summary.originalBytes, countStyle: .file)
+                let after = ByteCountFormatter.string(fromByteCount: summary.compressedBytes, countStyle: .file)
+                return "Compressed \(summary.outputs.count) image(s): \(before) → \(after)"
+            } catch {
+                return "Compression failed: \(error.localizedDescription)"
+            }
 
         case .airDrop:
             guard let service = NSSharingService(named: .sendViaAirDrop) else {
@@ -147,6 +178,105 @@ public enum DropActionExecutor {
             )
         }
         return outputs
+    }
+
+    public nonisolated static func recognizeText(from urls: [URL]) throws -> String {
+        var blocks: [String] = []
+        for url in urls {
+            guard let nsImage = NSImage(contentsOf: url),
+                  let cgImage = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+                continue
+            }
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            try handler.perform([request])
+
+            let lines = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+            if !lines.isEmpty {
+                blocks.append(lines.joined(separator: "\n"))
+            }
+        }
+        guard !blocks.isEmpty else {
+            throw NSError(
+                domain: "NotchNestDrop",
+                code: 4,
+                userInfo: [NSLocalizedDescriptionKey: "No readable text found in image(s)."]
+            )
+        }
+        return blocks.joined(separator: "\n\n")
+    }
+
+    public nonisolated static func compressImages(
+        _ urls: [URL],
+        maxDimension: CGFloat = 1920,
+        jpegQuality: Double = 0.76
+    ) throws -> (outputs: [URL], originalBytes: Int64, compressedBytes: Int64) {
+        var outputs: [URL] = []
+        var totalBefore: Int64 = 0
+        var totalAfter: Int64 = 0
+        let fm = FileManager.default
+
+        for url in urls {
+            guard let sourceImage = NSImage(contentsOf: url),
+                  let cgImage = sourceImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+                continue
+            }
+            let srcBytes = ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+            totalBefore += Int64(srcBytes)
+
+            let srcW = CGFloat(cgImage.width)
+            let srcH = CGFloat(cgImage.height)
+            let longest = max(srcW, srcH)
+            let scale = (longest > maxDimension && maxDimension > 0) ? (maxDimension / longest) : 1.0
+            let dstW = max(1, Int(round(srcW * scale)))
+            let dstH = max(1, Int(round(srcH * scale)))
+
+            guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+                  let ctx = CGContext(
+                      data: nil,
+                      width: dstW,
+                      height: dstH,
+                      bitsPerComponent: 8,
+                      bytesPerRow: 0,
+                      space: colorSpace,
+                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+                  )
+            else {
+                continue
+            }
+            ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+            ctx.fill(CGRect(x: 0, y: 0, width: dstW, height: dstH))
+            ctx.interpolationQuality = .high
+            ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: dstW, height: dstH))
+            guard let rendered = ctx.makeImage() else { continue }
+
+            let rep = NSBitmapImageRep(cgImage: rendered)
+            guard let jpegData = rep.representation(
+                using: .jpeg,
+                properties: [.compressionFactor: jpegQuality]
+            ) else { continue }
+
+            let dir = fm.isWritableFile(atPath: url.deletingLastPathComponent().path)
+                ? url.deletingLastPathComponent()
+                : fm.temporaryDirectory
+            let base = url.deletingPathExtension().lastPathComponent
+            let outURL = uniqueURL(in: dir, baseName: "\(base)-compressed", ext: "jpg")
+            try jpegData.write(to: outURL, options: [.atomic])
+            outputs.append(outURL)
+            totalAfter += Int64(jpegData.count)
+        }
+
+        guard !outputs.isEmpty else {
+            throw NSError(
+                domain: "NotchNestDrop",
+                code: 5,
+                userInfo: [NSLocalizedDescriptionKey: "Drop PNG, JPG, HEIC, or TIFF images to compress."]
+            )
+        }
+        return (outputs, totalBefore, totalAfter)
     }
 
     @MainActor

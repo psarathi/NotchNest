@@ -196,61 +196,71 @@ struct ClipsTabView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
 
-            HStack(spacing: 5) {
+            HStack(spacing: 6) {
                 Button {
                     copyClipToClipboard(item)
                 } label: {
                     Image(systemName: "doc.on.doc")
                         .font(.system(size: 10))
-                        .foregroundStyle(.white.opacity(0.65))
+                        .foregroundStyle(.white.opacity(0.68))
                 }
                 .buttonStyle(.plain)
                 .help("Copy to Clipboard")
+
+                if item.isImage {
+                    Button {
+                        Task { await model.performDropAction(.copyText, on: [item.url]) }
+                    } label: {
+                        Image(systemName: "text.viewfinder")
+                            .font(.system(size: 10))
+                            .foregroundStyle(NotchTheme.sagePaper)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Extract Text (OCR)")
+                }
 
                 Button {
                     Task { await model.performDropAction(.airDrop, on: [item.url]) }
                 } label: {
                     Image(systemName: "dot.radiowaves.left.and.right")
                         .font(.system(size: 10))
-                        .foregroundStyle(.white.opacity(0.65))
+                        .foregroundStyle(.white.opacity(0.68))
                 }
                 .buttonStyle(.plain)
                 .help("AirDrop")
 
-                Button {
-                    Task { await model.performDropAction(.zip, on: [item.url]) }
-                } label: {
-                    Image(systemName: "doc.zipper")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.white.opacity(0.65))
-                }
-                .buttonStyle(.plain)
-                .help("Create Zip")
-
-                if item.isImage {
-                    let isPNG = item.url.pathExtension.lowercased() == "png"
-                    Button {
-                        Task {
-                            await model.performDropAction(isPNG ? .convertJPG : .convertPNG, on: [item.url])
+                Menu {
+                    if item.isImage {
+                        let isPNG = item.url.pathExtension.lowercased() == "png"
+                        Button("Copy Text (OCR)") {
+                            Task { await model.performDropAction(.copyText, on: [item.url]) }
                         }
-                    } label: {
-                        Text(isPNG ? "JPG" : "PNG")
-                            .font(.system(size: 8.5, weight: .bold, design: .rounded))
-                            .foregroundStyle(NotchTheme.skyWave)
+                        Button("Compress Image") {
+                            Task { await model.performDropAction(.compressImage, on: [item.url]) }
+                        }
+                        Button(isPNG ? "Convert to JPG" : "Convert to PNG") {
+                            Task { await model.performDropAction(isPNG ? .convertJPG : .convertPNG, on: [item.url]) }
+                        }
+                        Divider()
                     }
-                    .buttonStyle(.plain)
-                    .help(isPNG ? "Convert to JPG" : "Convert to PNG")
-                }
-
-                Button {
-                    NSWorkspace.shared.activateFileViewerSelecting([item.url])
+                    Button("Create Zip") {
+                        Task { await model.performDropAction(.zip, on: [item.url]) }
+                    }
+                    Button("Reveal in Finder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([item.url])
+                    }
+                    Divider()
+                    Button("Move to Trash", role: .destructive) {
+                        Task { await model.performDropAction(.trash, on: [item.url]) }
+                    }
                 } label: {
-                    Image(systemName: "folder")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.white.opacity(0.65))
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.white.opacity(0.68))
                 }
-                .buttonStyle(.plain)
-                .help("Reveal in Finder")
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("More Actions")
 
                 Spacer()
 

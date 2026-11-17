@@ -837,6 +837,48 @@ public final class NotchNestModel {
         persistence.saveNotes(notes)
     }
 
+    @discardableResult
+    public func openOrCreateMeetingNote(
+        title: String,
+        date: Date = Date(),
+        switchToNotes: Bool = true
+    ) -> NoteEntry {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveTitle = cleanTitle.isEmpty ? "Meeting Notes" : cleanTitle
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        let prefix = "[\(formatter.string(from: date))] \(effectiveTitle)"
+
+        let chosen: NoteEntry
+        if let existing = notes.first(where: { $0.title == prefix }) {
+            chosen = existing
+        } else {
+            let template = """
+            # \(effectiveTitle)
+
+            ## Agenda
+            - 
+
+            ## Notes
+            - 
+
+            ## Action Items
+            - 
+            """
+            let created = NoteEntry(title: prefix, body: template, updatedAt: date)
+            notes.insert(created, at: 0)
+            persistence.saveNotes(notes)
+            chosen = created
+        }
+
+        if switchToNotes {
+            selectedNoteID = chosen.id
+            activeTab = .notes
+            onRequestPanelExpand?(.notes)
+        }
+        return chosen
+    }
+
     public func updateNoteBody(_ id: UUID, body: String) {
         guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
         notes[idx].body = body
@@ -987,6 +1029,24 @@ public final class NotchNestModel {
             pendingWorkspaceTypedSeed += seed
         }
         workspaceFocusRequestNonce &+= 1
+    }
+
+    public func prepareMeetingHandoff(title: String?, createNote: Bool) {
+        if settings.autoPauseMediaOnJoin {
+            mediaService.pauseIfPlaying()
+            if isAmbientPreviewActive {
+                isAmbientPreviewActive = false
+                syncAmbientAudio()
+            }
+        }
+        if createNote, let title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            _ = openOrCreateMeetingNote(title: title, switchToNotes: false)
+        }
+    }
+
+    public func joinMeeting(url: URL, title: String? = nil, openPrepNote: Bool? = nil) {
+        prepareMeetingHandoff(title: title, createNote: openPrepNote ?? settings.createMeetingNoteOnJoin)
+        NSWorkspace.shared.open(url)
     }
 
     public func toggleDarkModeWithHUD() {
