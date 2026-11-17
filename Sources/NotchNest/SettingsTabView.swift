@@ -56,6 +56,7 @@ struct SettingsTabView: View {
             Toggle("Show Now Playing in notch", isOn: $model.settings.showMediaInNotch)
             Toggle("Show mic mute badge in notch", isOn: $model.settings.showMicIndicatorInNotch)
             Toggle("Show computer vitals when expanded", isOn: $model.settings.showExpandedVitals)
+            Toggle("Scroll-wheel notch gestures (volume & modes)", isOn: $model.settings.scrollWheelGesturesEnabled)
             Toggle("Show focus timer beside notch", isOn: $model.settings.showTimerInNotch)
             Toggle("Show next meeting in notch", isOn: $model.settings.showNextEventInNotch)
             Toggle("Hide notch in screen recordings", isOn: $model.settings.hideInScreenCapture)
@@ -207,6 +208,25 @@ struct SettingsTabView: View {
                 in: 1...30,
                 step: 1
             )
+
+            Toggle("Focus Guard nudges (when distracted)", isOn: $model.settings.focusGuardEnabled)
+            if model.settings.focusGuardEnabled {
+                Stepper(
+                    "Guard delay: \(model.settings.focusGuardDelaySeconds)s",
+                    value: $model.settings.focusGuardDelaySeconds,
+                    in: 15...180,
+                    step: 15
+                )
+                Toggle("Warn on web browsers too", isOn: $model.settings.focusGuardIncludeBrowsers)
+                HStack(spacing: 6) {
+                    Text("Allowlist:")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.68))
+                    TextField("Terminal, Xcode, Notes...", text: $model.settings.focusGuardAllowlist)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11))
+                }
+            }
 
             Divider().overlay(Color.white.opacity(0.08))
 

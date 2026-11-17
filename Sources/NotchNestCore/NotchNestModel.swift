@@ -34,6 +34,8 @@ public final class NotchNestModel {
     /// Task currently linked to a Focus session or pinned as a Live Activity nudge.
     public var activeFocusTaskID: UUID?
     public var taskRemainingSeconds: [UUID: TimeInterval] = [:]
+    public var microTimers: [MicroTimerItem] = []
+    public var focusGuardSnoozedUntil: Date?
     public var autoTriggeredReminderTaskIDs: Set<UUID> = []
     public var activeCountdownSourceIsReminder = false
     public var pinnedLiveActivityTaskID: UUID?
@@ -71,6 +73,9 @@ public final class NotchNestModel {
     private var lastObservedTimerState: TimerRunState = .idle
     private var lastEnsuredDailyNoteKey: String = ""
     private var nudgeRefreshTimer: Timer?
+    private var microTimerTickTimer: Timer?
+    private var focusGuardLastNudgeByBundle: [String: Date] = [:]
+    private var scrollGestureRecognizer = NotchScrollGestureRecognizer()
     private var lastWeatherRefreshAt: Date?
     private var transientDismissTask: Task<Void, Never>?
     @ObservationIgnored private nonisolated(unsafe) var screenUnlockObserver: NSObjectProtocol?
@@ -108,6 +113,7 @@ public final class NotchNestModel {
         self.devHubService = DeveloperHubService()
 
         self.ensureTodayDailyNote()
+        self.loadPersistedMicroTimers()
         self.clips = mergeClips()
 
         self.timer.onPhaseComplete = { [weak self] phase, minutes in
@@ -1271,6 +1277,10 @@ public final class NotchNestModel {
             onHitRectNeedsUpdate?()
             return true
 
+        case .startMicroTimer(let label, let minutes):
+            _ = startMicroTimer(label: label, minutes: minutes)
+            return true
+
         case .translate(let targetLanguage, let text):
             sendToTranslator(text, targetLanguage: targetLanguage, triggerTranslation: true)
             return true
@@ -1279,6 +1289,279 @@ public final class NotchNestModel {
             _ = snapWindow(to: zone)
             return true
         }
+    }
+
+    // MARK: - Stacked Micro-Timers, Focus Guard & Scroll Gestures (Phase 3)
+
+    private func loadPersistedMicroTimers(now: Date = Date()) {
+        let loaded = persistence.loadMicroTimers()
+        var active: [MicroTimerItem] = []
+        for var item in loaded {
+            if item.isPaused {
+                if item.remainingSeconds > 0 {
+                    active.append(item)
+                }
+            } else if let end = item.endDate {
+                let rem = end.timeIntervalSince(now)
+                if rem > 1 {
+                    item.remainingSeconds = rem
+                    active.append(item)
+                }
+            }
+        }
+        microTimers = active
+        if active.count != loaded.count {
+            persistence.saveMicroTimers(active)
+        }
+    }
+
+    @discardableResult
+    public func startMicroTimer(label: String, minutes: Int, now: Date = Date()) -> MicroTimerItem {
+        let clampedMinutes = min(max(1, minutes), 180)
+        let cleanLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveLabel = cleanLabel.isEmpty ? "Timer" : cleanLabel
+
+        microTimers.removeAll { $0.label.caseInsensitiveCompare(effectiveLabel) == .orderedSame }
+        if microTimers.count >= 5 {
+            microTimers.removeLast()
+        }
+
+        let item = MicroTimerItem(label: effectiveLabel, minutes: clampedMinutes, now: now)
+        microTimers.insert(item, at: 0)
+        persistence.saveMicroTimers(microTimers)
+        syncMicroTimerTicker()
+        onHitRectNeedsUpdate?()
+
+        postTransientLiveActivity(
+            TransientLiveActivity(
+                category: .pomodoro,
+                title: "\(item.label) · \(clampedMinutes)m",
+                subtitle: "Micro-timer counting down",
+                badgeText: "TIMER",
+                symbolName: "timer",
+                accentHex: "#38BDF8",
+                targetTab: .timer
+            ),
+            durationSeconds: 3.0
+        )
+        return item
+    }
+
+    public func toggleMicroTimerPause(_ id: UUID, now: Date = Date()) {
+        guard let idx = microTimers.firstIndex(where: { $0.id == id }) else { return }
+        if microTimers[idx].isPaused {
+            microTimers[idx].isPaused = false
+            microTimers[idx].endDate = now.addingTimeInterval(microTimers[idx].remainingSeconds)
+        } else {
+            if let end = microTimers[idx].endDate {
+                microTimers[idx].remainingSeconds = max(0, end.timeIntervalSince(now))
+            }
+            microTimers[idx].isPaused = true
+            microTimers[idx].endDate = nil
+        }
+        persistence.saveMicroTimers(microTimers)
+        syncMicroTimerTicker()
+    }
+
+    public func dismissMicroTimer(_ id: UUID) {
+        microTimers.removeAll { $0.id == id }
+        persistence.saveMicroTimers(microTimers)
+        syncMicroTimerTicker()
+        onHitRectNeedsUpdate?()
+    }
+
+    public func clearMicroTimers() {
+        microTimers.removeAll()
+        persistence.saveMicroTimers([])
+        syncMicroTimerTicker()
+        onHitRectNeedsUpdate?()
+    }
+
+    @discardableResult
+    public func tickMicroTimers(now: Date = Date()) -> [MicroTimerItem] {
+        guard !microTimers.isEmpty else { return [] }
+        var completed: [MicroTimerItem] = []
+        var updated: [MicroTimerItem] = []
+
+        for var item in microTimers {
+            if !item.isPaused, let end = item.endDate {
+                let rem = end.timeIntervalSince(now)
+                if rem <= 0 {
+                    item.remainingSeconds = 0
+                    completed.append(item)
+                    continue
+                }
+                item.remainingSeconds = rem
+            }
+            updated.append(item)
+        }
+
+        microTimers = updated
+        if !completed.isEmpty {
+            persistence.saveMicroTimers(updated)
+            syncMicroTimerTicker()
+            if settings.soundEnabled {
+                NSSound(named: NSSound.Name("Glass"))?.play()
+            }
+            for item in completed {
+                sendNotification(
+                    title: "Timer Complete",
+                    body: "\(item.label) finished."
+                )
+                postTransientLiveActivity(
+                    TransientLiveActivity(
+                        category: .pomodoro,
+                        title: "Done · \(item.label)",
+                        subtitle: "\(Int(round(item.totalSeconds / 60)))m micro-timer finished",
+                        badgeText: "DONE",
+                        symbolName: "checkmark.seal.fill",
+                        accentHex: "#21C473",
+                        targetTab: .timer
+                    ),
+                    durationSeconds: 4.5
+                )
+            }
+            triggerMascotPulse()
+            onHitRectNeedsUpdate?()
+        }
+        return completed
+    }
+
+    private func syncMicroTimerTicker() {
+        let hasRunning = microTimers.contains { !$0.isPaused }
+        if hasRunning {
+            guard microTimerTickTimer == nil else { return }
+            let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.tickMicroTimers()
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            microTimerTickTimer = timer
+        } else {
+            microTimerTickTimer?.invalidate()
+            microTimerTickTimer = nil
+        }
+    }
+
+    @discardableResult
+    public func evaluateFocusGuard(now: Date = Date()) -> String? {
+        guard timer.phase == .focus, timer.state == .running else { return nil }
+        guard let bundleID = screenTimeService.currentFrontmostBundleID,
+              let appName = screenTimeService.currentFrontmostAppName,
+              let category = screenTimeService.currentFrontmostCategory,
+              let enteredAt = screenTimeService.currentFrontmostEnteredAt else {
+            return nil
+        }
+
+        let dwell = now.timeIntervalSince(enteredAt)
+        guard ScreenTimeService.shouldTriggerFocusGuard(
+            bundleID: bundleID,
+            appName: appName,
+            category: category,
+            dwellSeconds: dwell,
+            isFocusing: true,
+            settings: settings,
+            now: now,
+            snoozedUntil: focusGuardSnoozedUntil,
+            lastNudgedAtByBundle: focusGuardLastNudgeByBundle
+        ) else {
+            return nil
+        }
+
+        focusGuardLastNudgeByBundle[bundleID] = now
+        let subtitle = activeFocusTask.map { "Return to: \($0.title)" }
+            ?? "Focus block active · \(timer.formattedRemaining) left"
+        postTransientLiveActivity(
+            TransientLiveActivity(
+                category: .notifications,
+                title: "Focus Guard · \(appName)",
+                subtitle: subtitle,
+                badgeText: "FOCUS",
+                symbolName: "eye.trianglebadge.exclamationmark",
+                accentHex: "#EE9E5B",
+                targetTab: .today
+            ),
+            durationSeconds: 4.8
+        )
+        return appName
+    }
+
+    public func snoozeFocusGuard(minutes: Int = 20, now: Date = Date()) {
+        focusGuardSnoozedUntil = now.addingTimeInterval(TimeInterval(max(1, minutes) * 60))
+        if transientLiveActivity?.title.hasPrefix("Focus Guard") == true {
+            dismissTransientLiveActivity()
+        }
+    }
+
+    @discardableResult
+    public func handleCollapsedScroll(
+        deltaX: Double,
+        deltaY: Double,
+        hasPreciseDeltas: Bool,
+        isMomentumPhase: Bool,
+        now: Date = Date()
+    ) -> NotchScrollGestureAction? {
+        guard settings.scrollWheelGesturesEnabled, !isExpanded else { return nil }
+
+        let isMediaSlotActive =
+            (settings.collapsedDisplayMode == .music)
+            || (settings.collapsedDisplayMode == .automatic
+                && settings.showMediaInNotch
+                && mediaService.currentTrack?.isPlaying == true
+                && timer.state == .idle)
+
+        guard let action = scrollGestureRecognizer.ingest(
+            deltaX: deltaX,
+            deltaY: deltaY,
+            hasPreciseDeltas: hasPreciseDeltas,
+            isMomentumPhase: isMomentumPhase,
+            isMediaSlotActive: isMediaSlotActive,
+            now: now
+        ) else {
+            return nil
+        }
+
+        switch action {
+        case .adjustVolume(let delta):
+            let nextVol = min(1.0, max(0.0, systemService.systemVolume + delta))
+            systemService.setSystemVolume(nextVol)
+            let pct = Int(round(nextVol * 100))
+            postTransientLiveActivity(
+                TransientLiveActivity(
+                    category: .systemHUD,
+                    title: pct == 0 ? "Volume Muted" : "Volume · \(pct)%",
+                    subtitle: "Scroll vertically over notch to adjust",
+                    badgeText: "\(pct)%",
+                    symbolName: pct == 0 ? "speaker.slash.fill" : (pct < 45 ? "speaker.wave.1.fill" : "speaker.wave.3.fill"),
+                    accentHex: "#38BDF8",
+                    targetTab: .hub,
+                    targetHubSection: .overview
+                ),
+                durationSeconds: 1.8
+            )
+
+        case .cycleCollapsedMode(let step):
+            let modes = CollapsedDisplayMode.allCases
+            if let currentIdx = modes.firstIndex(of: settings.collapsedDisplayMode) {
+                let count = modes.count
+                let nextIdx = ((currentIdx + step) % count + count) % count
+                settings.collapsedDisplayMode = modes[nextIdx]
+                onHitRectNeedsUpdate?()
+            }
+
+        case .skipTrack(let step):
+            if step > 0 {
+                mediaService.nextTrack()
+            } else {
+                mediaService.previousTrack()
+            }
+        }
+        return action
+    }
+
+    public func resetScrollGestureState() {
+        scrollGestureRecognizer.reset()
     }
 
     @discardableResult
@@ -1588,6 +1871,8 @@ public final class NotchNestModel {
         hotKeyManager?.unregister()
         nudgeRefreshTimer?.invalidate()
         nudgeRefreshTimer = nil
+        microTimerTickTimer?.invalidate()
+        microTimerTickTimer = nil
     }
 
     private func mergeClips() -> [ClipItem] {
@@ -1662,6 +1947,7 @@ public final class NotchNestModel {
                 guard let self else { return }
                 self.ensureTodayDailyNote()
                 self.evaluatePreDueReminders()
+                self.evaluateFocusGuard()
                 if self.timer.state != self.lastObservedTimerState {
                     self.lastObservedTimerState = self.timer.state
                     self.syncAmbientAudio()
@@ -1737,7 +2023,11 @@ public final class NotchNestModel {
             clipboardService.startMonitoring()
         }
         systemService.setPreventSleep(settings.preventSleepEnabled)
+        screenTimeService.onSampleRecorded = { [weak self] in
+            self?.evaluateFocusGuard()
+        }
         screenTimeService.startTracking()
+        syncMicroTimerTicker()
         snapService.updateTopEdgeDragSnap(enabled: settings.snapOnTopEdgeDrag)
         onPrivacyModeChanged?(settings.hideInScreenCapture)
         refreshWeather(force: true)

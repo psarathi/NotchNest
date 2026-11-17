@@ -165,6 +165,98 @@ struct TimerTabView: View {
                 .padding(9)
                 .background(NotchTheme.lavenderCard, in: RoundedRectangle(cornerRadius: 12))
 
+                // Parallel Micro-Timers & Focus Guard quick strip
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Text("Micro-Timers")
+                            .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.75))
+
+                        microPresetButton("+ 2m", label: "Stretch", minutes: 2)
+                        microPresetButton("+ 4m Tea", label: "Tea", minutes: 4)
+                        microPresetButton("+ 10m", label: "Standup", minutes: 10)
+
+                        Spacer(minLength: 4)
+
+                        if model.settings.focusGuardEnabled {
+                            let isSnoozed = (model.focusGuardSnoozedUntil ?? .distantPast) > Date()
+                            Button {
+                                if isSnoozed {
+                                    model.focusGuardSnoozedUntil = nil
+                                } else {
+                                    model.snoozeFocusGuard(minutes: 20)
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: isSnoozed ? "shield.slash" : "shield.lefthalf.filled")
+                                        .font(.system(size: 9.5, weight: .semibold))
+                                    Text(isSnoozed ? "Guard Snoozed" : "Focus Guard")
+                                        .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                }
+                                .foregroundStyle(isSnoozed ? .white.opacity(0.65) : NotchTheme.mintComplete)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3.5)
+                                .background(
+                                    (isSnoozed ? Color.white.opacity(0.08) : NotchTheme.mintComplete.opacity(0.14)),
+                                    in: Capsule()
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .help(isSnoozed ? "Resume Focus Guard nudges now" : "Snooze Focus Guard nudges for 20 minutes")
+                        }
+                    }
+
+                    if !model.microTimers.isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 6) {
+                                ForEach(model.microTimers) { item in
+                                    HStack(spacing: 5) {
+                                        Text(item.label)
+                                            .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                            .foregroundStyle(.white.opacity(0.9))
+                                            .lineLimit(1)
+                                            .fixedSize()
+                                        Text(item.formattedRemaining)
+                                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                            .foregroundStyle(item.isPaused ? Color.amberGlow : .white)
+                                            .fixedSize()
+                                        Button {
+                                            model.toggleMicroTimerPause(item.id)
+                                        } label: {
+                                            Image(systemName: item.isPaused ? "play.fill" : "pause.fill")
+                                                .font(.system(size: 8, weight: .bold))
+                                                .foregroundStyle(.white)
+                                                .frame(width: 16, height: 16)
+                                                .background(Color.white.opacity(0.16), in: Circle())
+                                        }
+                                        .buttonStyle(.plain)
+                                        Button {
+                                            model.dismissMicroTimer(item.id)
+                                        } label: {
+                                            Image(systemName: "xmark")
+                                                .font(.system(size: 7.5, weight: .bold))
+                                                .foregroundStyle(.white.opacity(0.65))
+                                                .frame(width: 15, height: 15)
+                                                .background(Color.white.opacity(0.1), in: Circle())
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Color.amberGlow.opacity(0.14), in: Capsule())
+                                    .overlay(
+                                        Capsule().stroke(Color.amberGlow.opacity(0.28), lineWidth: 1)
+                                    )
+                                    .fixedSize()
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
+
                 Spacer(minLength: 0)
 
                 HStack(spacing: 10) {
@@ -268,5 +360,19 @@ struct TimerTabView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .background(Color.white.opacity(0.06), in: Capsule())
+    }
+
+    private func microPresetButton(_ title: String, label: String, minutes: Int) -> some View {
+        Button {
+            model.startMicroTimer(label: label, minutes: minutes)
+        } label: {
+            Text(title)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color.amberGlow)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(Color.amberGlow.opacity(0.14), in: Capsule())
+        }
+        .buttonStyle(.plain)
     }
 }

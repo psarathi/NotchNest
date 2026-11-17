@@ -386,6 +386,7 @@ struct TodayTabView: View {
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(NotchTheme.sageInk)
                         .focused($isAddingFocused)
+                        .help("Add a task (e.g. Prep slides 45m tomorrow 5pm #Work) or command (timer tea 4m, focus 25m, break 5m, mute mic, clear done)")
                         .onTapGesture {
                             onRequestFocus()
                             isNotepadFocused = false

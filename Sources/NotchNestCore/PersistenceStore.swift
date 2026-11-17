@@ -118,6 +118,14 @@ public final class PersistenceStore: @unchecked Sendable {
         save(entries, to: "clipboard_history.json")
     }
 
+    public func loadMicroTimers() -> [MicroTimerItem] {
+        load([MicroTimerItem].self, from: "micro_timers.json") ?? []
+    }
+
+    public func saveMicroTimers(_ timers: [MicroTimerItem]) {
+        save(timers, to: "micro_timers.json")
+    }
+
     private func fileURL(for name: String) -> URL {
         baseDirectory.appendingPathComponent(name)
     }

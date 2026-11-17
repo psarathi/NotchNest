@@ -890,6 +890,121 @@ public enum ExpandedCountdownStyle: String, CaseIterable, Codable, Sendable, Ide
     }
 }
 
+public struct MicroTimerItem: Identifiable, Codable, Equatable, Sendable {
+    public var id: UUID
+    public var label: String
+    public var totalSeconds: TimeInterval
+    public var remainingSeconds: TimeInterval
+    public var endDate: Date?
+    public var isPaused: Bool
+    public var createdAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        label: String,
+        minutes: Int,
+        now: Date = Date()
+    ) {
+        let clampedMinutes = min(max(1, minutes), 180)
+        let seconds = TimeInterval(clampedMinutes * 60)
+        self.id = id
+        self.label = label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Timer" : label.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.totalSeconds = seconds
+        self.remainingSeconds = seconds
+        self.endDate = now.addingTimeInterval(seconds)
+        self.isPaused = false
+        self.createdAt = now
+    }
+
+    public var progress: Double {
+        guard totalSeconds > 0 else { return 0 }
+        return min(max((totalSeconds - remainingSeconds) / totalSeconds, 0), 1)
+    }
+
+    public var formattedRemaining: String {
+        let total = max(0, Int(ceil(remainingSeconds)))
+        let hours = total / 3600
+        let mins = (total % 3600) / 60
+        let secs = total % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, mins, secs)
+        }
+        return String(format: "%02d:%02d", mins, secs)
+    }
+}
+
+public enum NotchScrollGestureAction: Equatable, Sendable {
+    case adjustVolume(delta: Double)
+    case cycleCollapsedMode(step: Int)
+    case skipTrack(step: Int)
+}
+
+/// Damped scroll-wheel gesture recognizer for the narrow collapsed notch bar.
+/// Drops inertial trackpad momentum and enforces per-swipe hysteresis on horizontal swipes.
+public struct NotchScrollGestureRecognizer: Sendable {
+    private var accumulatedY: Double = 0
+    private var accumulatedX: Double = 0
+    private var lastHorizontalFireAt: Date = .distantPast
+
+    public init() {}
+
+    public mutating func reset() {
+        accumulatedY = 0
+        accumulatedX = 0
+    }
+
+    public mutating func ingest(
+        deltaX: Double,
+        deltaY: Double,
+        hasPreciseDeltas: Bool,
+        isMomentumPhase: Bool,
+        isMediaSlotActive: Bool,
+        now: Date = Date()
+    ) -> NotchScrollGestureAction? {
+        // Ignore inertial coasting frames from macOS trackpads so flicks do not overshoot.
+        if isMomentumPhase {
+            return nil
+        }
+
+        let verticalScale = hasPreciseDeltas ? 1.0 : 12.0
+        let horizontalScale = hasPreciseDeltas ? 1.0 : 14.0
+        let dy = deltaY * verticalScale
+        let dx = deltaX * horizontalScale
+
+        let absY = abs(dy)
+        let absX = abs(dx)
+
+        if absY >= 0.4 && absY >= absX * 1.15 {
+            accumulatedX = 0
+            accumulatedY += dy
+            let stepThreshold = 14.0
+            if abs(accumulatedY) >= stepThreshold {
+                let direction: Double = accumulatedY > 0 ? 1.0 : -1.0
+                accumulatedY = 0
+                return .adjustVolume(delta: direction * 0.05)
+            }
+            return nil
+        }
+
+        if absX >= 0.6 && absX > absY * 1.15 {
+            accumulatedY = 0
+            guard now.timeIntervalSince(lastHorizontalFireAt) >= 0.55 else {
+                return nil
+            }
+            accumulatedX += dx
+            let swipeThreshold = 26.0
+            if abs(accumulatedX) >= swipeThreshold {
+                let step = accumulatedX < 0 ? 1 : -1
+                accumulatedX = 0
+                lastHorizontalFireAt = now
+                return isMediaSlotActive ? .skipTrack(step: step) : .cycleCollapsedMode(step: step)
+            }
+        }
+
+        return nil
+    }
+}
+
 public struct AppSettings: Codable, Equatable, Sendable {
     public var hoverToExpand: Bool
     public var hoverDelayMs: Int
@@ -904,6 +1019,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var collapsedDisplayMode: CollapsedDisplayMode
     public var expandedCountdownStyle: ExpandedCountdownStyle
     public var showExpandedVitals: Bool
+    public var scrollWheelGesturesEnabled: Bool
+    public var focusGuardEnabled: Bool
+    public var focusGuardDelaySeconds: Int
+    public var focusGuardIncludeBrowsers: Bool
+    public var focusGuardAllowlist: String
     public var preferredMusicPlayer: MusicPlayerPreference
     public var autoPauseMediaOnJoin: Bool
     public var createMeetingNoteOnJoin: Bool
@@ -952,6 +1072,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
         collapsedDisplayMode: CollapsedDisplayMode = .automatic,
         expandedCountdownStyle: ExpandedCountdownStyle = .bottomRail,
         showExpandedVitals: Bool = true,
+        scrollWheelGesturesEnabled: Bool = true,
+        focusGuardEnabled: Bool = true,
+        focusGuardDelaySeconds: Int = 45,
+        focusGuardIncludeBrowsers: Bool = false,
+        focusGuardAllowlist: String = "Terminal, Xcode, Cursor, Antigravity, Notes, NotchNest",
         preferredMusicPlayer: MusicPlayerPreference = .automatic,
         autoPauseMediaOnJoin: Bool = true,
         createMeetingNoteOnJoin: Bool = false,
@@ -999,6 +1124,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.collapsedDisplayMode = collapsedDisplayMode
         self.expandedCountdownStyle = expandedCountdownStyle
         self.showExpandedVitals = showExpandedVitals
+        self.scrollWheelGesturesEnabled = scrollWheelGesturesEnabled
+        self.focusGuardEnabled = focusGuardEnabled
+        self.focusGuardDelaySeconds = focusGuardDelaySeconds
+        self.focusGuardIncludeBrowsers = focusGuardIncludeBrowsers
+        self.focusGuardAllowlist = focusGuardAllowlist
         self.preferredMusicPlayer = preferredMusicPlayer
         self.autoPauseMediaOnJoin = autoPauseMediaOnJoin
         self.createMeetingNoteOnJoin = createMeetingNoteOnJoin
@@ -1048,6 +1178,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case collapsedDisplayMode
         case expandedCountdownStyle
         case showExpandedVitals
+        case scrollWheelGesturesEnabled
+        case focusGuardEnabled
+        case focusGuardDelaySeconds
+        case focusGuardIncludeBrowsers
+        case focusGuardAllowlist
         case preferredMusicPlayer
         case autoPauseMediaOnJoin
         case createMeetingNoteOnJoin
@@ -1098,6 +1233,12 @@ public struct AppSettings: Codable, Equatable, Sendable {
         collapsedDisplayMode = try c.decodeIfPresent(CollapsedDisplayMode.self, forKey: .collapsedDisplayMode) ?? .automatic
         expandedCountdownStyle = try c.decodeIfPresent(ExpandedCountdownStyle.self, forKey: .expandedCountdownStyle) ?? .bottomRail
         showExpandedVitals = try c.decodeIfPresent(Bool.self, forKey: .showExpandedVitals) ?? true
+        scrollWheelGesturesEnabled = try c.decodeIfPresent(Bool.self, forKey: .scrollWheelGesturesEnabled) ?? true
+        focusGuardEnabled = try c.decodeIfPresent(Bool.self, forKey: .focusGuardEnabled) ?? true
+        focusGuardDelaySeconds = try c.decodeIfPresent(Int.self, forKey: .focusGuardDelaySeconds) ?? 45
+        focusGuardIncludeBrowsers = try c.decodeIfPresent(Bool.self, forKey: .focusGuardIncludeBrowsers) ?? false
+        focusGuardAllowlist = try c.decodeIfPresent(String.self, forKey: .focusGuardAllowlist)
+            ?? "Terminal, Xcode, Cursor, Antigravity, Notes, NotchNest"
         preferredMusicPlayer = try c.decodeIfPresent(MusicPlayerPreference.self, forKey: .preferredMusicPlayer) ?? .automatic
         autoPauseMediaOnJoin = try c.decodeIfPresent(Bool.self, forKey: .autoPauseMediaOnJoin) ?? true
         createMeetingNoteOnJoin = try c.decodeIfPresent(Bool.self, forKey: .createMeetingNoteOnJoin) ?? false

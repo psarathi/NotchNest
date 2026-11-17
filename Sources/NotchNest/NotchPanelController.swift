@@ -90,6 +90,16 @@ final class NotchContainerView: NSView {
         super.mouseDown(with: event)
     }
 
+    var onScrollNotch: ((NSEvent) -> Bool)?
+
+    override func scrollWheel(with event: NSEvent) {
+        let local = convert(event.locationInWindow, from: nil)
+        if activeHitRect.contains(local), onScrollNotch?(event) == true {
+            return
+        }
+        super.scrollWheel(with: event)
+    }
+
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         let urls = extractFileURLs(from: sender.draggingPasteboard)
         guard !urls.isEmpty else { return [] }
@@ -331,6 +341,23 @@ final class NotchPanelController {
         containerView.onMouseExitNotch = { [weak self] in
             self?.handleMouseExited()
         }
+
+        containerView.onScrollNotch = { [weak self] event in
+            guard let self else { return false }
+            guard !self.model.isExpanded, self.model.settings.scrollWheelGesturesEnabled else {
+                return false
+            }
+            if event.phase == .ended || event.phase == .cancelled {
+                self.model.resetScrollGestureState()
+            }
+            _ = self.model.handleCollapsedScroll(
+                deltaX: Double(event.scrollingDeltaX),
+                deltaY: Double(event.scrollingDeltaY),
+                hasPreciseDeltas: event.hasPreciseScrollingDeltas,
+                isMomentumPhase: !event.momentumPhase.isEmpty
+            )
+            return true
+        }
         containerView.onClickInsideNotch = { [weak self] in
             guard let self else { return }
             if self.model.isExpanded {
@@ -511,6 +538,7 @@ final class NotchPanelController {
         hoverExpandTask?.cancel()
         hoverExpandTask = nil
         model.isHoveringNotch = false
+        model.resetScrollGestureState()
         guard model.isExpanded, !model.isPinned, !isTrackingMenu else { return }
 
         // Keep open if user is actively typing inside the panel
@@ -549,8 +577,9 @@ final class NotchPanelController {
                     return nil
                 }
                 let mediaPillVisible = self.model.mediaService.currentTrack != nil && self.model.settings.showMediaInNotch
-                if self.model.showsLiveActivityPill || mediaPillVisible {
-                    // Allow Snooze / Done / Join / Media controls to handle clicks directly
+                let timerPillControlsVisible = self.model.timer.state != .idle || !self.model.microTimers.isEmpty
+                if self.model.showsLiveActivityPill || mediaPillVisible || timerPillControlsVisible {
+                    // Allow Snooze / Done / Join / Media / Timer controls to handle clicks directly
                     return event
                 }
                 self.expand(makeKey: true)

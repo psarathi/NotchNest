@@ -505,6 +505,7 @@ public enum NaturalLanguageTaskParser {
 public enum WorkspaceQuickCommand: Equatable, Sendable {
     case appendNote(String)
     case startFocus(minutes: Int)
+    case startMicroTimer(label: String, minutes: Int)
     case translate(targetLanguage: String?, text: String)
     case snapWindow(SnapZone)
 
@@ -514,6 +515,8 @@ public enum WorkspaceQuickCommand: Equatable, Sendable {
             return "Command · Append to note: \(text)"
         case .startFocus(let minutes):
             return "Command · Start Focus timer (\(minutes)m)"
+        case .startMicroTimer(let label, let minutes):
+            return "Command · Start \(minutes)m micro-timer (\(label))"
         case .translate(let targetLanguage, let text):
             if let targetLanguage {
                 return "Command · Translate to \(targetLanguage): \(text)"
@@ -534,6 +537,9 @@ public enum WorkspaceQuickCommand: Equatable, Sendable {
         if let (lang, text) = matchTranslateCommand(in: trimmed) {
             return .translate(targetLanguage: lang, text: text)
         }
+        if let (label, minutes) = matchMicroTimerCommand(in: trimmed) {
+            return .startMicroTimer(label: label, minutes: minutes)
+        }
         if let minutes = matchFocusCommand(in: trimmed) {
             return .startFocus(minutes: minutes)
         }
@@ -541,6 +547,48 @@ public enum WorkspaceQuickCommand: Equatable, Sendable {
             return .snapWindow(zone)
         }
         return nil
+    }
+
+    private static func matchMicroTimerCommand(in text: String) -> (String, Int)? {
+        let nsText = text as NSString
+        // Explicit prefix forms: "timer tea 4m", "timer 4m tea", "t: tea 4m", "t: 4m"
+        if let prefixRegex = try? NSRegularExpression(pattern: #"^(?:timer:|timer\s+|t:\s*)(.+)$"#, options: [.caseInsensitive]),
+           let prefixMatch = prefixRegex.firstMatch(in: text, range: NSRange(location: 0, length: nsText.length)),
+           prefixMatch.range(at: 1).location != NSNotFound {
+            let body = nsText.substring(with: prefixMatch.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+            return extractMicroTimerLabelAndMinutes(from: body, requireUnit: false)
+        }
+        // Trailing timer keyword: "tea 4m timer", "4m tea timer"
+        if let suffixRegex = try? NSRegularExpression(pattern: #"^(.+?)\s+timer$"#, options: [.caseInsensitive]),
+           let suffixMatch = suffixRegex.firstMatch(in: text, range: NSRange(location: 0, length: nsText.length)),
+           suffixMatch.range(at: 1).location != NSNotFound {
+            let body = nsText.substring(with: suffixMatch.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+            return extractMicroTimerLabelAndMinutes(from: body, requireUnit: true)
+        }
+        return nil
+    }
+
+    private static func extractMicroTimerLabelAndMinutes(from body: String, requireUnit: Bool) -> (String, Int)? {
+        let nsBody = body as NSString
+        let pattern = requireUnit
+            ? #"(?:^|\s)(\d{1,3})\s*(?:m|min|mins|minute|minutes)(?=\s|$)"#
+            : #"(?:^|\s)(\d{1,3})\s*(?:m|min|mins|minute|minutes)?(?=\s|$)"#
+        guard let durRegex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let match = durRegex.firstMatch(in: body, range: NSRange(location: 0, length: nsBody.length)),
+              match.range(at: 1).location != NSNotFound,
+              let range = Range(match.range, in: body) else {
+            return nil
+        }
+        let digits = nsBody.substring(with: match.range(at: 1))
+        guard let mins = Int(digits), (1...180).contains(mins) else { return nil }
+
+        var remaining = body
+        remaining.removeSubrange(range)
+        let cleanedLabel = remaining
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+        let label = cleanedLabel.isEmpty ? "Timer" : cleanedLabel
+        return (label, mins)
     }
 
     private static func matchNoteCommand(in text: String) -> String? {

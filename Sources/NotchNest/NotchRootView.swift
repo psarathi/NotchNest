@@ -122,6 +122,9 @@ struct NotchRootView: View {
             if isMusicPlaying {
                 return .music
             }
+            if model.settings.showTimerInNotch && !model.microTimers.isEmpty {
+                return .timer
+            }
             if let dueTask = nextScheduledDueTask,
                let dueDate = dueTask.dueDate,
                dueDate.timeIntervalSinceNow <= 2 * 3600 && dueDate.timeIntervalSinceNow >= -300 {
@@ -212,6 +215,10 @@ struct NotchRootView: View {
             if model.timer.state != .idle {
                 return model.activeFocusTask?.title ?? model.timer.phase.label
             }
+            if let topMicro = model.microTimers.first {
+                let extra = model.microTimers.count > 1 ? " +\(model.microTimers.count - 1)" : ""
+                return "\(topMicro.label)\(extra)"
+            }
             if let dueTask = nextScheduledDueTask {
                 return dueTask.title
             }
@@ -274,6 +281,16 @@ struct NotchRootView: View {
                         .lineLimit(1)
                         .fixedSize()
 
+                    if !model.microTimers.isEmpty {
+                        Text("+\(model.microTimers.count)")
+                            .font(.system(size: 9, weight: .bold, design: .rounded))
+                            .foregroundStyle(Color.amberGlow)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.amberGlow.opacity(0.18), in: Capsule())
+                            .fixedSize()
+                    }
+
                     AnimatedWaveformView(
                         isActive: model.timer.state == .running,
                         barColor: model.timer.state == .running ? NotchTheme.skyWave : NotchTheme.peachAction,
@@ -286,6 +303,69 @@ struct NotchRootView: View {
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(Color.white.opacity(0.09), in: Capsule())
+                .contentShape(Rectangle())
+                .onTapGesture {}
+            } else if let topMicro = model.microTimers.first {
+                HStack(spacing: 4) {
+                    if model.isHoveringNotch {
+                        Button {
+                            model.toggleMicroTimerPause(topMicro.id)
+                        } label: {
+                            Image(systemName: topMicro.isPaused ? "play.fill" : "pause.fill")
+                                .font(.system(size: 8.5, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 17, height: 17)
+                                .background(Color.white.opacity(0.18), in: Circle())
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .help(topMicro.isPaused ? "Resume \(topMicro.label)" : "Pause \(topMicro.label)")
+                    } else {
+                        Circle()
+                            .fill(topMicro.isPaused ? Color.amberGlow.opacity(0.75) : Color.amberGlow)
+                            .frame(width: 5.5, height: 5.5)
+                    }
+
+                    if layout.hasHardwareNotch {
+                        Text(topMicro.label)
+                            .font(.system(size: 10, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.84))
+                            .lineLimit(1)
+                            .frame(maxWidth: 48, alignment: .leading)
+                    }
+
+                    Text(topMicro.formattedRemaining)
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(topMicro.isPaused ? Color.amberGlow : .white)
+                        .lineLimit(1)
+                        .fixedSize()
+
+                    if model.microTimers.count > 1 {
+                        Text("+\(model.microTimers.count - 1)")
+                            .font(.system(size: 9, weight: .bold, design: .rounded))
+                            .foregroundStyle(Color.amberGlow)
+                            .fixedSize()
+                    }
+
+                    if model.isHoveringNotch {
+                        Button {
+                            model.dismissMicroTimer(topMicro.id)
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundStyle(.white.opacity(0.75))
+                                .frame(width: 16, height: 16)
+                                .background(Color.white.opacity(0.12), in: Circle())
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Dismiss \(topMicro.label)")
+                    }
+                }
+                .fixedSize()
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.amberGlow.opacity(0.14), in: Capsule())
                 .contentShape(Rectangle())
                 .onTapGesture {}
             } else if let dueTask = nextScheduledDueTask,
@@ -485,6 +565,21 @@ struct NotchRootView: View {
                 )
             }
 
+            if transient.title.hasPrefix("Focus Guard") {
+                Button {
+                    model.snoozeFocusGuard(minutes: 20)
+                } label: {
+                    Text("Snooze 20m")
+                        .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3.5)
+                        .background(accent, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("Pause Focus Guard nudges for 20 minutes")
+            }
+
             Button {
                 model.dismissTransientLiveActivity()
             } label: {
@@ -649,6 +744,7 @@ struct NotchRootView: View {
 
     private var shouldShowExpandedTelemetryBar: Bool {
         model.timer.state != .idle
+            || !model.microTimers.isEmpty
             || model.settings.showExpandedVitals
             || nextReminderOrDueTask != nil
     }
@@ -815,6 +911,9 @@ struct NotchRootView: View {
             if model.settings.expandedCountdownStyle == .headerPill {
                 if model.timer.state != .idle {
                     headerCountdownPill
+                }
+                if !model.microTimers.isEmpty {
+                    headerMicroTimerPill
                 }
                 if model.settings.showExpandedVitals {
                     vitalsChipsRow(compact: true)
@@ -1002,6 +1101,54 @@ struct NotchRootView: View {
         )
     }
 
+    @ViewBuilder
+    private var headerMicroTimerPill: some View {
+        if let first = model.microTimers.first {
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(first.isPaused ? Color.white.opacity(0.45) : Color.amberGlow)
+                    .frame(width: 5.5, height: 5.5)
+
+                Text(first.label)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.84))
+                    .lineLimit(1)
+                    .frame(maxWidth: 64, alignment: .leading)
+
+                Text(first.formattedRemaining)
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(first.isPaused ? Color.amberGlow : .white)
+                    .fixedSize()
+
+                if model.microTimers.count > 1 {
+                    Text("+\(model.microTimers.count - 1)")
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .foregroundStyle(Color.amberGlow)
+                        .fixedSize()
+                }
+
+                Button {
+                    model.toggleMicroTimerPause(first.id)
+                } label: {
+                    Image(systemName: first.isPaused ? "play.fill" : "pause.fill")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.black)
+                        .frame(width: 15, height: 15)
+                        .background(Color.amberGlow, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .help(first.isPaused ? "Resume \(first.label)" : "Pause \(first.label)")
+            }
+            .padding(.horizontal, 6.5)
+            .padding(.vertical, 3)
+            .background(Color.amberGlow.opacity(0.14), in: Capsule())
+            .overlay(
+                Capsule().stroke(Color.amberGlow.opacity(0.32), lineWidth: 1)
+            )
+            .fixedSize()
+        }
+    }
+
     private var expandedTelemetryStrip: some View {
         let isTimerActive = model.timer.state != .idle
         let isRunning = model.timer.state == .running
@@ -1101,7 +1248,7 @@ struct NotchRootView: View {
                     }
                     .buttonStyle(.plain)
                 }
-            } else {
+            } else if model.microTimers.isEmpty {
                 HStack(spacing: 5) {
                     Image(systemName: "timer")
                         .font(.system(size: 10))
@@ -1110,6 +1257,32 @@ struct NotchRootView: View {
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.white.opacity(0.55))
                 }
+            }
+
+            if !model.microTimers.isEmpty {
+                microTimersStripRow
+            }
+
+            microTimerAddMenu
+
+            if let snoozedUntil = model.focusGuardSnoozedUntil, snoozedUntil > Date() {
+                Button {
+                    model.focusGuardSnoozedUntil = nil
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "shield.slash")
+                            .font(.system(size: 9, weight: .semibold))
+                        Text("Guard snoozed")
+                            .font(.system(size: 9.5, weight: .medium, design: .rounded))
+                    }
+                    .foregroundStyle(.white.opacity(0.7))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2.5)
+                    .background(Color.white.opacity(0.08), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .fixedSize()
+                .help("Click to re-enable Focus Guard nudges now")
             }
 
             Spacer(minLength: 8)
@@ -1125,6 +1298,101 @@ struct NotchRootView: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(Color.white.opacity(0.08), lineWidth: 1)
         )
+    }
+
+    @ViewBuilder
+    private var microTimersStripRow: some View {
+        let chips = HStack(spacing: 5) {
+            ForEach(model.microTimers) { item in
+                microTimerChip(item)
+            }
+        }
+        if model.microTimers.count > 2 {
+            ScrollView(.horizontal, showsIndicators: false) {
+                chips
+            }
+            .frame(maxWidth: 260)
+        } else {
+            chips.fixedSize()
+        }
+    }
+
+    private func microTimerChip(_ item: MicroTimerItem) -> some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(item.isPaused ? Color.white.opacity(0.45) : Color.amberGlow)
+                .frame(width: 5, height: 5)
+
+            Text(item.label)
+                .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.88))
+                .lineLimit(1)
+                .fixedSize()
+
+            Text(item.formattedRemaining)
+                .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                .foregroundStyle(item.isPaused ? Color.amberGlow : .white)
+                .fixedSize()
+
+            Button {
+                model.toggleMicroTimerPause(item.id)
+            } label: {
+                Image(systemName: item.isPaused ? "play.fill" : "pause.fill")
+                    .font(.system(size: 7.5, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.86))
+                    .frame(width: 14, height: 14)
+                    .background(Color.white.opacity(0.14), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .help(item.isPaused ? "Resume \(item.label)" : "Pause \(item.label)")
+
+            Button {
+                model.dismissMicroTimer(item.id)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 7, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.62))
+                    .frame(width: 13, height: 13)
+                    .background(Color.white.opacity(0.09), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss \(item.label)")
+        }
+        .padding(.horizontal, 6.5)
+        .padding(.vertical, 2.5)
+        .background(Color.amberGlow.opacity(item.isPaused ? 0.08 : 0.14), in: Capsule())
+        .overlay(
+            Capsule().stroke(Color.amberGlow.opacity(0.28), lineWidth: 1)
+        )
+        .fixedSize()
+    }
+
+    private var microTimerAddMenu: some View {
+        Menu {
+            Button("2m Stretch") { model.startMicroTimer(label: "Stretch", minutes: 2) }
+            Button("4m Tea") { model.startMicroTimer(label: "Tea", minutes: 4) }
+            Button("10m Standup") { model.startMicroTimer(label: "Standup", minutes: 10) }
+            Button("15m Quick Break") { model.startMicroTimer(label: "Break", minutes: 15) }
+            if !model.microTimers.isEmpty {
+                Divider()
+                Button("Clear All Micro-Timers") { model.clearMicroTimers() }
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: "plus.circle.fill")
+                    .font(.system(size: 9.5, weight: .semibold))
+                Text("Timer")
+                    .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+            }
+            .foregroundStyle(Color.amberGlow)
+            .padding(.horizontal, 6.5)
+            .padding(.vertical, 2.5)
+            .background(Color.amberGlow.opacity(0.14), in: Capsule())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Start parallel micro-timer (or type 'timer tea 4m' in Workspace)")
     }
 
     private var countdownStripTitle: String {

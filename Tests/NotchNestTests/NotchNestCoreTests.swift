@@ -973,4 +973,254 @@ struct NotchNestCoreTests {
         #expect(reloaded.settings.expandedCountdownStyle == .headerPill)
         #expect(reloaded.settings.showExpandedVitals == false)
     }
+
+    @Test("Micro-timer quick command parsing preserves NL task durations and persists pause/tick/completion")
+    @MainActor
+    func microTimerParsingLifecycleAndPersistence() throws {
+        // Quick command variants
+        #expect(WorkspaceQuickCommand.parse("timer tea 4m") == .startMicroTimer(label: "tea", minutes: 4))
+        #expect(WorkspaceQuickCommand.parse("t: standup 10m") == .startMicroTimer(label: "standup", minutes: 10))
+        #expect(WorkspaceQuickCommand.parse("tea 4m timer") == .startMicroTimer(label: "tea", minutes: 4))
+        #expect(WorkspaceQuickCommand.parse("timer 4m") == .startMicroTimer(label: "Timer", minutes: 4))
+        #expect(WorkspaceQuickCommand.parse("timer 15 stretch") == .startMicroTimer(label: "stretch", minutes: 15))
+
+        // Must NOT hijack normal NL task duration entry
+        #expect(WorkspaceQuickCommand.parse("Prep slides 45m") == nil)
+        let nlTask = NaturalLanguageTaskParser.parse("Prep slides 45m", referenceDate: Date())
+        #expect(nlTask.title == "Prep slides")
+        #expect(nlTask.targetMinutes == 45)
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NotchNestMicroTimerTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let now = Date(timeIntervalSince1970: 1_795_000_000)
+        let model = NotchNestModel(persistence: PersistenceStore(baseDirectory: tempDir), enableSystemIntegrations: false)
+        defer { model.shutdown() }
+
+        let tea = model.startMicroTimer(label: "Tea", minutes: 4, now: now)
+        #expect(model.microTimers.count == 1)
+        #expect(tea.formattedRemaining == "04:00")
+
+        // Tick 90s forward -> 2m30s left
+        let completedEarly = model.tickMicroTimers(now: now.addingTimeInterval(90))
+        #expect(completedEarly.isEmpty)
+        #expect(model.microTimers.first?.formattedRemaining == "02:30")
+
+        // Pause freezes remaining time across elapsed wall clock
+        model.toggleMicroTimerPause(tea.id, now: now.addingTimeInterval(90))
+        #expect(model.microTimers.first?.isPaused == true)
+        _ = model.tickMicroTimers(now: now.addingTimeInterval(200))
+        #expect(model.microTimers.first?.formattedRemaining == "02:30")
+
+        // Verify persistence round-trip before completion
+        let reloaded = NotchNestModel(persistence: PersistenceStore(baseDirectory: tempDir), enableSystemIntegrations: false)
+        defer { reloaded.shutdown() }
+        #expect(reloaded.microTimers.count == 1)
+        #expect(reloaded.microTimers.first?.label == "Tea")
+        #expect(reloaded.microTimers.first?.isPaused == true)
+
+        // Resume and tick past expiry -> completes and posts transient completion popup
+        reloaded.toggleMicroTimerPause(tea.id, now: now.addingTimeInterval(200))
+        let finished = reloaded.tickMicroTimers(now: now.addingTimeInterval(400))
+        #expect(finished.count == 1)
+        #expect(finished.first?.label == "Tea")
+        #expect(reloaded.microTimers.isEmpty)
+        #expect(reloaded.transientLiveActivity?.badgeText == "DONE")
+    }
+
+    @Test("Focus Guard evaluates categories, allowlist, browser guard, snooze, and per-app cooldown")
+    func focusGuardPredicateRules() {
+        var settings = AppSettings()
+        let now = Date(timeIntervalSince1970: 1_795_001_000)
+
+        // Triggers on distracting Communication app during active Focus past dwell delay
+        #expect(ScreenTimeService.shouldTriggerFocusGuard(
+            bundleID: "com.tinyspeck.slackmacgap",
+            appName: "Slack",
+            category: "Communication",
+            dwellSeconds: 45,
+            isFocusing: true,
+            settings: settings,
+            now: now
+        ) == true)
+
+        // Does NOT trigger before dwell threshold or outside active Focus
+        #expect(ScreenTimeService.shouldTriggerFocusGuard(
+            bundleID: "com.tinyspeck.slackmacgap",
+            appName: "Slack",
+            category: "Communication",
+            dwellSeconds: 20,
+            isFocusing: true,
+            settings: settings,
+            now: now
+        ) == false)
+        #expect(ScreenTimeService.shouldTriggerFocusGuard(
+            bundleID: "com.tinyspeck.slackmacgap",
+            appName: "Slack",
+            category: "Communication",
+            dwellSeconds: 90,
+            isFocusing: false,
+            settings: settings,
+            now: now
+        ) == false)
+
+        // Safe / allowlisted / NotchNest apps never trigger
+        #expect(ScreenTimeService.shouldTriggerFocusGuard(
+            bundleID: "com.apple.dt.Xcode",
+            appName: "Xcode",
+            category: "Development",
+            dwellSeconds: 300,
+            isFocusing: true,
+            settings: settings,
+            now: now
+        ) == false)
+        #expect(ScreenTimeService.shouldTriggerFocusGuard(
+            bundleID: "com.local.NotchNest",
+            appName: "NotchNest",
+            category: "Other",
+            dwellSeconds: 300,
+            isFocusing: true,
+            settings: settings,
+            now: now
+        ) == false)
+
+        // Browsers ignored by default unless focusGuardIncludeBrowsers == true
+        #expect(ScreenTimeService.shouldTriggerFocusGuard(
+            bundleID: "com.google.Chrome",
+            appName: "Google Chrome",
+            category: "Browser",
+            dwellSeconds: 120,
+            isFocusing: true,
+            settings: settings,
+            now: now
+        ) == false)
+        settings.focusGuardIncludeBrowsers = true
+        #expect(ScreenTimeService.shouldTriggerFocusGuard(
+            bundleID: "com.google.Chrome",
+            appName: "Google Chrome",
+            category: "Browser",
+            dwellSeconds: 120,
+            isFocusing: true,
+            settings: settings,
+            now: now
+        ) == true)
+
+        // Snooze and cooldown suppress repeat nudges; disabled guard suppresses all
+        #expect(ScreenTimeService.shouldTriggerFocusGuard(
+            bundleID: "com.tinyspeck.slackmacgap",
+            appName: "Slack",
+            category: "Communication",
+            dwellSeconds: 120,
+            isFocusing: true,
+            settings: settings,
+            now: now,
+            snoozedUntil: now.addingTimeInterval(600)
+        ) == false)
+        #expect(ScreenTimeService.shouldTriggerFocusGuard(
+            bundleID: "com.tinyspeck.slackmacgap",
+            appName: "Slack",
+            category: "Communication",
+            dwellSeconds: 120,
+            isFocusing: true,
+            settings: settings,
+            now: now,
+            lastNudgedAtByBundle: ["com.tinyspeck.slackmacgap": now.addingTimeInterval(-60)],
+            cooldownSeconds: 180
+        ) == false)
+        settings.focusGuardEnabled = false
+        #expect(ScreenTimeService.shouldTriggerFocusGuard(
+            bundleID: "com.tinyspeck.slackmacgap",
+            appName: "Slack",
+            category: "Communication",
+            dwellSeconds: 120,
+            isFocusing: true,
+            settings: settings,
+            now: now
+        ) == false)
+    }
+
+    @Test("Momentum-damped scroll gesture recognizer filters inertial frames and enforces swipe hysteresis")
+    func scrollGestureRecognizerMomentumAndHysteresis() {
+        var recognizer = NotchScrollGestureRecognizer()
+        let t0 = Date(timeIntervalSince1970: 1_795_002_000)
+
+        // Inertial coasting frames are always dropped
+        #expect(recognizer.ingest(
+            deltaX: 0,
+            deltaY: 30,
+            hasPreciseDeltas: true,
+            isMomentumPhase: true,
+            isMediaSlotActive: false,
+            now: t0
+        ) == nil)
+
+        // Sub-threshold vertical accumulates until >= 14pt -> volume step
+        #expect(recognizer.ingest(
+            deltaX: 0,
+            deltaY: 8,
+            hasPreciseDeltas: true,
+            isMomentumPhase: false,
+            isMediaSlotActive: false,
+            now: t0
+        ) == nil)
+        let volUp = recognizer.ingest(
+            deltaX: 0,
+            deltaY: 7,
+            hasPreciseDeltas: true,
+            isMomentumPhase: false,
+            isMediaSlotActive: false,
+            now: t0
+        )
+        #expect(volUp == .adjustVolume(delta: 0.05))
+
+        let volDown = recognizer.ingest(
+            deltaX: 0,
+            deltaY: -16,
+            hasPreciseDeltas: true,
+            isMomentumPhase: false,
+            isMediaSlotActive: true,
+            now: t0
+        )
+        #expect(volDown == .adjustVolume(delta: -0.05))
+
+        // Horizontal swipe -> .cycleCollapsedMode when media slot inactive, with 0.55s hysteresis
+        #expect(recognizer.ingest(
+            deltaX: -28,
+            deltaY: 0,
+            hasPreciseDeltas: true,
+            isMomentumPhase: false,
+            isMediaSlotActive: false,
+            now: t0
+        ) == .cycleCollapsedMode(step: 1))
+
+        #expect(recognizer.ingest(
+            deltaX: -40,
+            deltaY: 0,
+            hasPreciseDeltas: true,
+            isMomentumPhase: false,
+            isMediaSlotActive: false,
+            now: t0.addingTimeInterval(0.25)
+        ) == nil)
+
+        // After hysteresis window passes, media slot maps horizontal swipe to .skipTrack
+        #expect(recognizer.ingest(
+            deltaX: 30,
+            deltaY: 0,
+            hasPreciseDeltas: true,
+            isMomentumPhase: false,
+            isMediaSlotActive: true,
+            now: t0.addingTimeInterval(0.70)
+        ) == .skipTrack(step: -1))
+    }
+
+    @Test("AppSettings decodes Phase 3 Focus Guard and scroll gesture defaults cleanly")
+    func appSettingsPhase3Defaults() throws {
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: Data("{}".utf8))
+        #expect(decoded.scrollWheelGesturesEnabled == true)
+        #expect(decoded.focusGuardEnabled == true)
+        #expect(decoded.focusGuardDelaySeconds == 45)
+        #expect(decoded.focusGuardIncludeBrowsers == false)
+        #expect(decoded.focusGuardAllowlist == "Terminal, Xcode, Cursor, Antigravity, Notes, NotchNest")
+    }
 }

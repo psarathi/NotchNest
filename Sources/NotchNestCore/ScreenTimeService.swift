@@ -24,6 +24,12 @@ public struct AppScreenTimeRow: Identifiable, Equatable, Sendable {
 @Observable
 public final class ScreenTimeService {
     public private(set) var stats: ScreenTimeDailyStats
+    public private(set) var currentFrontmostBundleID: String?
+    public private(set) var currentFrontmostAppName: String?
+    public private(set) var currentFrontmostCategory: String?
+    public private(set) var currentFrontmostEnteredAt: Date?
+
+    public var onSampleRecorded: (@MainActor () -> Void)?
 
     private let persistence: PersistenceStore
     private var lastBundleID: String?
@@ -94,11 +100,70 @@ public final class ScreenTimeService {
             }
         }
 
+        if lastBundleID != bundleID {
+            currentFrontmostEnteredAt = now
+        } else if currentFrontmostEnteredAt == nil {
+            currentFrontmostEnteredAt = now
+        }
+        currentFrontmostBundleID = bundleID
+        currentFrontmostAppName = appName
+        currentFrontmostCategory = category
+
         stats.appNamesByBundleID[bundleID] = appName
         stats.categoriesByBundleID[bundleID] = category
         lastBundleID = bundleID
         lastSampleDate = now
         persistence.saveScreenTimeStats(stats)
+        onSampleRecorded?()
+    }
+
+    public nonisolated static func shouldTriggerFocusGuard(
+        bundleID: String,
+        appName: String,
+        category: String,
+        dwellSeconds: TimeInterval,
+        isFocusing: Bool,
+        settings: AppSettings,
+        now: Date = Date(),
+        snoozedUntil: Date? = nil,
+        lastNudgedAtByBundle: [String: Date] = [:],
+        cooldownSeconds: TimeInterval = 180
+    ) -> Bool {
+        guard settings.focusGuardEnabled, isFocusing else { return false }
+        if let snoozedUntil, snoozedUntil > now { return false }
+
+        let lowerBundle = bundleID.lowercased()
+        let lowerApp = appName.lowercased()
+        if lowerBundle.contains("notchnest") { return false }
+
+        // Allowlist matches app names or bundle fragments (comma-separated)
+        let allowTokens = settings.focusGuardAllowlist
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+        if allowTokens.contains(where: { lowerApp.contains($0) || lowerBundle.contains($0) }) {
+            return false
+        }
+
+        let isDistractingCategory: Bool
+        switch category {
+        case "Communication", "Media & Design", "Other":
+            isDistractingCategory = true
+        case "Browser":
+            isDistractingCategory = settings.focusGuardIncludeBrowsers
+        default:
+            isDistractingCategory = false
+        }
+        guard isDistractingCategory else { return false }
+
+        let threshold = TimeInterval(max(10, settings.focusGuardDelaySeconds))
+        guard dwellSeconds >= threshold else { return false }
+
+        if let lastNudge = lastNudgedAtByBundle[bundleID],
+           now.timeIntervalSince(lastNudge) < cooldownSeconds {
+            return false
+        }
+        return true
     }
 
     public var rankedApps: [AppScreenTimeRow] {
