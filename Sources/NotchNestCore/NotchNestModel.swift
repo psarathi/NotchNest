@@ -34,6 +34,8 @@ public final class NotchNestModel {
     /// Task currently linked to a Focus session or pinned as a Live Activity nudge.
     public var activeFocusTaskID: UUID?
     public var taskRemainingSeconds: [UUID: TimeInterval] = [:]
+    public var autoTriggeredReminderTaskIDs: Set<UUID> = []
+    public var activeCountdownSourceIsReminder = false
     public var pinnedLiveActivityTaskID: UUID?
     public var dismissedEventIDs: Set<String> = []
     public var isAmbientPreviewActive = false
@@ -438,7 +440,8 @@ public final class NotchNestModel {
         dueDate: Date? = nil,
         projectTag: String? = nil,
         recurrence: TaskRecurrence = .none,
-        targetMinutes: Int? = nil
+        targetMinutes: Int? = nil,
+        reminderLeadMinutes: Int? = nil
     ) {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -464,13 +467,15 @@ public final class NotchNestModel {
             dueDate: dueDate,
             projectTag: projectTag,
             recurrence: recurrence,
-            targetMinutes: targetMinutes
+            targetMinutes: targetMinutes,
+            reminderLeadMinutes: reminderLeadMinutes
         )
         if settings.syncReminders && eventKit.reminderAuth == .authorized {
             item.reminderIdentifier = eventKit.upsertReminder(for: item)
         }
         tasks.insert(item, at: 0)
         sortAndSaveTasks()
+        evaluatePreDueReminders()
         onHitRectNeedsUpdate?()
     }
 
@@ -496,7 +501,8 @@ public final class NotchNestModel {
             dueDate: parsed.dueDate,
             projectTag: parsed.projectTag,
             recurrence: parsed.recurrence,
-            targetMinutes: parsed.targetMinutes
+            targetMinutes: parsed.targetMinutes,
+            reminderLeadMinutes: parsed.reminderLeadMinutes
         )
     }
 
@@ -509,11 +515,13 @@ public final class NotchNestModel {
             triggerMascotPulse()
             recordTaskCompletion(delta: 1)
             taskRemainingSeconds.removeValue(forKey: id)
+            autoTriggeredReminderTaskIDs.remove(id)
             if pinnedLiveActivityTaskID == id {
                 pinnedLiveActivityTaskID = nil
             }
             if activeFocusTaskID == id {
                 activeFocusTaskID = nil
+                activeCountdownSourceIsReminder = false
             }
         } else {
             recordTaskCompletion(delta: -1)
@@ -539,7 +547,11 @@ public final class NotchNestModel {
         bucket: TaskBucket? = nil,
         dayKey: String? = nil,
         updateTargetMinutes: Bool = false,
-        targetMinutes: Int? = nil
+        targetMinutes: Int? = nil,
+        updateDueDate: Bool = false,
+        dueDate: Date? = nil,
+        updateReminderLeadMinutes: Bool = false,
+        reminderLeadMinutes: Int? = nil
     ) {
         guard let idx = tasks.firstIndex(where: { $0.id == id }) else { return }
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -556,7 +568,26 @@ public final class NotchNestModel {
                 timer.configure(minutes: effectiveFocusMinutes(for: tasks[idx]), phase: .focus)
             }
         }
-        if let dayKey {
+        if updateDueDate {
+            tasks[idx].dueDate = dueDate
+            autoTriggeredReminderTaskIDs.remove(id)
+            if let dueDate {
+                let key = DailyFocusStats.todayKey(for: dueDate)
+                tasks[idx].scheduledDayKey = key
+                if Calendar.current.isDateInToday(dueDate) {
+                    tasks[idx].scheduledBucket = .today
+                } else if Calendar.current.isDateInTomorrow(dueDate) {
+                    tasks[idx].scheduledBucket = .tomorrow
+                } else {
+                    tasks[idx].scheduledBucket = .upcoming
+                }
+            }
+        }
+        if updateReminderLeadMinutes {
+            tasks[idx].reminderLeadMinutes = reminderLeadMinutes.map { min(max(0, $0), 180) }
+            autoTriggeredReminderTaskIDs.remove(id)
+        }
+        if !updateDueDate, let dayKey {
             tasks[idx].scheduledDayKey = dayKey
             if let bucket {
                 tasks[idx].scheduledBucket = bucket
@@ -573,13 +604,14 @@ public final class NotchNestModel {
                let targetDate = DailyFocusStats.date(fromDayKey: dayKey) {
                 tasks[idx].dueDate = Self.combining(day: targetDate, timeFrom: existingDue)
             }
-        } else if let bucket {
+        } else if !updateDueDate, let bucket {
             applyBucketTransition(at: idx, to: bucket)
         }
         if settings.syncReminders && eventKit.reminderAuth == .authorized {
             tasks[idx].reminderIdentifier = eventKit.upsertReminder(for: tasks[idx])
         }
         sortAndSaveTasks()
+        evaluatePreDueReminders()
         onHitRectNeedsUpdate?()
     }
 
@@ -693,8 +725,12 @@ public final class NotchNestModel {
         guard let idx = tasks.firstIndex(where: { $0.id == id }) else { return }
         let removed = tasks.remove(at: idx)
         taskRemainingSeconds.removeValue(forKey: id)
+        autoTriggeredReminderTaskIDs.remove(id)
         if pinnedLiveActivityTaskID == id { pinnedLiveActivityTaskID = nil }
-        if activeFocusTaskID == id { activeFocusTaskID = nil }
+        if activeFocusTaskID == id {
+            activeFocusTaskID = nil
+            activeCountdownSourceIsReminder = false
+        }
         if settings.syncReminders && eventKit.reminderAuth == .authorized {
             eventKit.deleteReminder(identifier: removed.reminderIdentifier)
         }
@@ -802,12 +838,64 @@ public final class NotchNestModel {
         }
 
         activeFocusTaskID = taskID
+        activeCountdownSourceIsReminder = false
         let targetTask = taskID.flatMap { id in tasks.first(where: { $0.id == id }) }
         let total = TimeInterval(effectiveFocusMinutes(for: targetTask) * 60)
         let rem = taskID.flatMap { taskRemainingSeconds[$0] } ?? total
         timer.configure(totalSeconds: total, remainingSeconds: rem, phase: .focus)
         syncAmbientAudio()
         onHitRectNeedsUpdate?()
+    }
+
+    @discardableResult
+    public func evaluatePreDueReminders(now: Date = Date()) -> TaskItem? {
+        guard timer.state == .idle else { return nil }
+
+        let candidates = tasks
+            .filter { !$0.isCompleted && !autoTriggeredReminderTaskIDs.contains($0.id) }
+            .sorted { ($0.dueDate ?? .distantFuture) < ($1.dueDate ?? .distantFuture) }
+
+        for task in candidates {
+            guard let due = task.dueDate,
+                  let lead = task.reminderLeadMinutes,
+                  let windowStart = task.reminderWindowStartDate(),
+                  now >= windowStart,
+                  now < due.addingTimeInterval(600) else {
+                continue
+            }
+
+            autoTriggeredReminderTaskIDs.insert(task.id)
+            let seconds: TimeInterval
+            if lead > 0 && due > now {
+                seconds = max(15, due.timeIntervalSince(now))
+            } else {
+                seconds = TimeInterval(effectiveFocusMinutes(for: task) * 60)
+            }
+
+            isAmbientPreviewActive = false
+            activeFocusTaskID = task.id
+            activeCountdownSourceIsReminder = true
+            timer.configure(totalSeconds: seconds, remainingSeconds: seconds, phase: .focus)
+            timer.start()
+            syncAmbientAudio()
+
+            let displayMins = max(1, Int(ceil(seconds / 60)))
+            postTransientLiveActivity(
+                TransientLiveActivity(
+                    category: .notifications,
+                    title: "Reminder: \(task.title)",
+                    subtitle: lead == 0 ? "Task is due now" : "Due in \(displayMins)m — countdown active",
+                    badgeText: "\(displayMins)m",
+                    symbolName: "bell.badge.fill",
+                    accentHex: "#FAC03D",
+                    targetTab: .today
+                ),
+                durationSeconds: 4.5
+            )
+            onHitRectNeedsUpdate?()
+            return task
+        }
+        return nil
     }
 
     public func startFocus(on taskID: UUID? = nil) {
@@ -902,6 +990,7 @@ public final class NotchNestModel {
                 }
             }
             taskRemainingSeconds.removeValue(forKey: linkedID)
+            activeCountdownSourceIsReminder = false
             timer.configure(minutes: settings.focusMinutes, phase: .focus)
             syncAmbientAudio()
             if !tasks[idx].isCompleted {
@@ -926,6 +1015,7 @@ public final class NotchNestModel {
 
     public func resetFocusTimer() {
         isAmbientPreviewActive = false
+        activeCountdownSourceIsReminder = false
         if let id = activeFocusTaskID {
             taskRemainingSeconds.removeValue(forKey: id)
         }
@@ -1571,6 +1661,7 @@ public final class NotchNestModel {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.ensureTodayDailyNote()
+                self.evaluatePreDueReminders()
                 if self.timer.state != self.lastObservedTimerState {
                     self.lastObservedTimerState = self.timer.state
                     self.syncAmbientAudio()
@@ -1710,7 +1801,10 @@ public final class NotchNestModel {
         if old.showLiveActivityNudge != settings.showLiveActivityNudge
             || old.showTransientLiveActivities != settings.showTransientLiveActivities
             || old.showMediaInNotch != settings.showMediaInNotch
-            || old.showMicIndicatorInNotch != settings.showMicIndicatorInNotch {
+            || old.showMicIndicatorInNotch != settings.showMicIndicatorInNotch
+            || old.collapsedDisplayMode != settings.collapsedDisplayMode
+            || old.expandedCountdownStyle != settings.expandedCountdownStyle
+            || old.showExpandedVitals != settings.showExpandedVitals {
             if !settings.showLiveActivityNudge || !settings.showTransientLiveActivities {
                 dismissTransientLiveActivity()
             }
@@ -1797,6 +1891,7 @@ public final class NotchNestModel {
                 taskRemainingSeconds.removeValue(forKey: activeFocusTaskID)
                 persistence.saveTasks(tasks)
             }
+            activeCountdownSourceIsReminder = false
         }
 
         if settings.soundEnabled {

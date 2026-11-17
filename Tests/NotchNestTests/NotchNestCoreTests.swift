@@ -905,4 +905,72 @@ struct NotchNestCoreTests {
         #expect(model.notes.contains(where: { $0.dailyDayKey == yesterdayKey && $0.body.contains("Lead landing page") }))
         #expect(!model.notes.contains(where: { $0.title == "Scratchpad" }))
     }
+
+    @Test("Pre-due reminder countdown auto-starts on window entry, stays pauseable, and decodes display settings")
+    @MainActor
+    func preDueReminderCountdownAndSettings() throws {
+        let cal = Calendar(identifier: .gregorian)
+        let ref = cal.date(from: DateComponents(year: 2026, month: 11, day: 16, hour: 16, minute: 48))!
+
+        let parsed = NaturalLanguageTaskParser.parse(
+            "Submit expenses at 5pm remind 15m before #Work",
+            referenceDate: ref,
+            calendar: cal
+        )
+        #expect(parsed.reminderLeadMinutes == 15)
+        #expect(parsed.projectTag == "Work")
+        #expect(parsed.title == "Submit expenses")
+        #expect(parsed.dueDate != nil)
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NotchNestPreDueTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let model = NotchNestModel(persistence: PersistenceStore(baseDirectory: tempDir), enableSystemIntegrations: false)
+        defer { model.shutdown() }
+
+        // Far-future task whose 15m window has NOT started yet (due in 45m)
+        model.addTask(
+            title: "Evening sync",
+            dueDate: ref.addingTimeInterval(45 * 60),
+            reminderLeadMinutes: 15
+        )
+        #expect(model.evaluatePreDueReminders(now: ref) == nil)
+        #expect(model.timer.state == .idle)
+
+        // Urgent task due in 12m with 15m lead reminder -> already inside pre-due window
+        model.addTask(
+            title: "Submit expenses",
+            dueDate: ref.addingTimeInterval(12 * 60),
+            reminderLeadMinutes: 15
+        )
+        let urgentTask = model.tasks.first(where: { $0.title == "Submit expenses" })!
+        let triggered = model.evaluatePreDueReminders(now: ref)
+        #expect(triggered?.id == urgentTask.id)
+        #expect(model.timer.state == .running)
+        #expect(model.activeFocusTaskID == urgentTask.id)
+        #expect(model.activeCountdownSourceIsReminder == true)
+        #expect(model.timer.remainingSeconds >= 11 * 60 && model.timer.remainingSeconds <= 12 * 60)
+
+        // Pausing stays paused and does not re-trigger
+        model.toggleFocusPlayPause()
+        #expect(model.timer.state == .paused)
+        #expect(model.evaluatePreDueReminders(now: ref) == nil)
+        #expect(model.timer.state == .paused)
+
+        // Default & custom AppSettings round-trip
+        let legacyDecoded = try JSONDecoder().decode(AppSettings.self, from: Data("{}".utf8))
+        #expect(legacyDecoded.collapsedDisplayMode == .automatic)
+        #expect(legacyDecoded.expandedCountdownStyle == .bottomRail)
+        #expect(legacyDecoded.showExpandedVitals == true)
+
+        model.settings.collapsedDisplayMode = .vitals
+        model.settings.expandedCountdownStyle = .headerPill
+        model.settings.showExpandedVitals = false
+        let reloaded = NotchNestModel(persistence: PersistenceStore(baseDirectory: tempDir), enableSystemIntegrations: false)
+        defer { reloaded.shutdown() }
+        #expect(reloaded.settings.collapsedDisplayMode == .vitals)
+        #expect(reloaded.settings.expandedCountdownStyle == .headerPill)
+        #expect(reloaded.settings.showExpandedVitals == false)
+    }
 }

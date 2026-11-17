@@ -103,8 +103,46 @@ struct NotchRootView: View {
 
     // MARK: - Compact Collapsed Pill
 
+    private enum ResolvedCollapsedSlot {
+        case timer
+        case music
+        case meeting
+        case vitals
+        case tasks
+        case minimal
+    }
+
+    private var resolvedCollapsedSlot: ResolvedCollapsedSlot {
+        switch model.settings.collapsedDisplayMode {
+        case .automatic:
+            if model.settings.showTimerInNotch && model.timer.state != .idle {
+                return .timer
+            }
+            if model.settings.showMediaInNotch && model.mediaService.currentTrack != nil {
+                return .music
+            }
+            if model.settings.showNextEventInNotch,
+               let nextEvent = model.eventKit.upcomingEvents.first,
+               nextEvent.startDate.timeIntervalSinceNow < 3600 * 3 && nextEvent.endDate > Date() {
+                return .meeting
+            }
+            return model.openTaskCount > 0 ? .tasks : .minimal
+        case .music:
+            return .music
+        case .countdown:
+            return .timer
+        case .meeting:
+            return .meeting
+        case .vitals:
+            return .vitals
+        case .minimal:
+            return .minimal
+        }
+    }
+
     private var collapsedContent: some View {
-        let track = model.settings.showMediaInNotch ? model.mediaService.currentTrack : nil
+        let slot = resolvedCollapsedSlot
+        let track = (slot == .music) ? model.mediaService.currentTrack : nil
 
         return HStack(spacing: 6) {
             HStack(spacing: 6) {
@@ -125,7 +163,7 @@ struct NotchRootView: View {
                 }
 
                 if !layout.hasHardwareNotch {
-                    Text(collapsedCenterText)
+                    Text(collapsedCenterText(for: slot, track: track))
                         .font(.system(size: 11, weight: .medium, design: .rounded))
                         .foregroundStyle(.white.opacity(0.78))
                         .lineLimit(1)
@@ -140,7 +178,7 @@ struct NotchRootView: View {
                 onExpand()
             }
 
-            collapsedRightBadge(track: track)
+            collapsedRightBadge(for: slot, track: track)
 
             if model.settings.showMicIndicatorInNotch,
                model.systemService.hasAudioInputDevice,
@@ -162,108 +200,203 @@ struct NotchRootView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var collapsedCenterText: String {
-        if let activeTask = model.activeFocusTask, model.timer.state == .running {
-            return activeTask.title
+    private func collapsedCenterText(for slot: ResolvedCollapsedSlot, track: NowPlayingInfo?) -> String {
+        switch slot {
+        case .timer:
+            if model.timer.state != .idle {
+                return model.activeFocusTask?.title ?? model.timer.phase.label
+            }
+            if let dueTask = nextScheduledDueTask {
+                return dueTask.title
+            }
+            return "Ready · Focus"
+        case .music:
+            if let track {
+                return track.title
+            }
+            return model.isHoveringNotch ? "Open Music Hub" : "Music Idle"
+        case .meeting:
+            if let nextEvent = model.eventKit.upcomingEvents.first,
+               nextEvent.endDate > Date() {
+                return nextEvent.title
+            }
+            return "No upcoming calls"
+        case .vitals:
+            let cpu = Int(round(model.systemService.cpuUsagePercent))
+            return String(format: "CPU %d%% · %.1fG", cpu, model.systemService.memoryUsedGB)
+        case .tasks:
+            return model.isHoveringNotch ? "Open NotchNest" : "NotchNest"
+        case .minimal:
+            return model.isHoveringNotch ? "Open NotchNest" : "NotchNest"
         }
-        if model.settings.showMediaInNotch,
-           let track = model.mediaService.currentTrack,
-           track.isPlaying {
-            return track.title
-        }
-        if model.settings.showNextEventInNotch,
-           let nextEvent = model.eventKit.upcomingEvents.first,
-           nextEvent.startDate.timeIntervalSinceNow < 3600 * 3 && nextEvent.endDate > Date() {
-            return nextEvent.title
-        }
-        return model.isHoveringNotch ? "Open NotchNest" : "NotchNest"
+    }
+
+    private var nextScheduledDueTask: TaskItem? {
+        model.tasks
+            .filter { !$0.isCompleted && $0.dueDate != nil }
+            .sorted { ($0.dueDate ?? .distantFuture) < ($1.dueDate ?? .distantFuture) }
+            .first
     }
 
     @ViewBuilder
-    private func collapsedRightBadge(track: NowPlayingInfo?) -> some View {
-        if model.settings.showTimerInNotch && model.timer.state != .idle {
-            HStack(spacing: 5) {
-                Text(model.timer.formattedRemaining)
-                    .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.white)
-
-                AnimatedWaveformView(
-                    isActive: model.timer.state == .running,
-                    barColor: model.timer.state == .running ? NotchTheme.skyWave : NotchTheme.peachAction,
-                    barWidth: 2,
-                    maxHeight: 10,
-                    spacing: 1.8
-                )
-            }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Color.white.opacity(0.08), in: Capsule())
-        } else if let track {
-            HStack(spacing: 5) {
-                if model.isHoveringNotch {
-                    if layout.collapsedSize.width >= 200 {
+    private func collapsedRightBadge(for slot: ResolvedCollapsedSlot, track: NowPlayingInfo?) -> some View {
+        switch slot {
+        case .timer:
+            if model.timer.state != .idle {
+                HStack(spacing: 4) {
+                    if model.isHoveringNotch {
                         Button {
-                            model.mediaService.previousTrack()
+                            model.toggleFocusPlayPause()
                         } label: {
-                            Image(systemName: "backward.fill")
+                            Image(systemName: model.timer.state == .running ? "pause.fill" : "play.fill")
+                                .font(.system(size: 8.5, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 18, height: 18)
+                                .background(Color.white.opacity(0.18), in: Circle())
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .help(model.timer.state == .running ? "Pause countdown" : "Resume countdown")
+                    }
+
+                    Text(model.timer.formattedRemaining)
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(model.timer.state == .paused ? Color.amberGlow : .white)
+
+                    AnimatedWaveformView(
+                        isActive: model.timer.state == .running,
+                        barColor: model.timer.state == .running ? NotchTheme.skyWave : NotchTheme.peachAction,
+                        barWidth: 2,
+                        maxHeight: 10,
+                        spacing: 1.8
+                    )
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.white.opacity(0.09), in: Capsule())
+                .contentShape(Rectangle())
+                .onTapGesture {}
+            } else if let dueTask = nextScheduledDueTask,
+                      let countdown = dueTask.dueCountdownLabel() ?? dueTask.formattedDueTime() {
+                HStack(spacing: 4) {
+                    Text(countdown)
+                        .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(NotchTheme.peachAction)
+                    if model.isHoveringNotch {
+                        Button {
+                            model.startFocus(on: dueTask.id)
+                        } label: {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 8.5, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 18, height: 18)
+                                .background(Color.white.opacity(0.16), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .contentShape(Rectangle())
+                .onTapGesture {}
+            } else {
+                Text("\(model.settings.focusMinutes)m")
+                    .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+
+        case .music:
+            if let track {
+                HStack(spacing: 5) {
+                    if model.isHoveringNotch {
+                        if layout.collapsedSize.width >= 200 {
+                            Button {
+                                model.mediaService.previousTrack()
+                            } label: {
+                                Image(systemName: "backward.fill")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundStyle(.white.opacity(0.88))
+                                    .frame(width: 18, height: 18)
+                                    .contentShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        Button {
+                            model.mediaService.togglePlayPause()
+                        } label: {
+                            Image(systemName: track.isPlaying ? "pause.fill" : "play.fill")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 22, height: 22)
+                                .background(Color.white.opacity(0.16), in: Circle())
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            model.mediaService.nextTrack()
+                        } label: {
+                            Image(systemName: "forward.fill")
                                 .font(.system(size: 9, weight: .bold))
                                 .foregroundStyle(.white.opacity(0.88))
-                                .frame(width: 18, height: 18)
+                                .frame(width: 20, height: 20)
                                 .contentShape(Circle())
                         }
                         .buttonStyle(.plain)
                     }
 
-                    Button {
-                        model.mediaService.togglePlayPause()
-                    } label: {
-                        Image(systemName: track.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 22, height: 22)
-                            .background(Color.white.opacity(0.16), in: Circle())
-                            .contentShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-
-                    Button {
-                        model.mediaService.nextTrack()
-                    } label: {
-                        Image(systemName: "forward.fill")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.white.opacity(0.88))
-                            .frame(width: 20, height: 20)
-                            .contentShape(Circle())
-                    }
-                    .buttonStyle(.plain)
+                    AnimatedWaveformView(
+                        isActive: track.isPlaying,
+                        barColor: NotchTheme.peachAction,
+                        barWidth: 2,
+                        maxHeight: 11,
+                        spacing: 1.8
+                    )
                 }
+                .padding(.vertical, 3)
+                .contentShape(Rectangle())
+                .onTapGesture {}
+            } else {
+                Image(systemName: "music.note")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.55))
+            }
 
-                AnimatedWaveformView(
-                    isActive: track.isPlaying,
-                    barColor: NotchTheme.peachAction,
-                    barWidth: 2,
-                    maxHeight: 11,
-                    spacing: 1.8
-                )
-            }
-            .padding(.vertical, 3)
-            .contentShape(Rectangle())
-            .onTapGesture {}
-        } else if model.settings.showNextEventInNotch,
-                  let nextEvent = model.eventKit.upcomingEvents.first,
-                  nextEvent.startDate.timeIntervalSinceNow < 3600 * 3 && nextEvent.endDate > Date() {
-            Text(nextEvent.statusLabel(relativeTo: Date()))
-                .font(.system(size: 10.5, weight: .semibold, design: .rounded))
-                .foregroundStyle(NotchTheme.peachAction)
-                .lineLimit(1)
-        } else if model.openTaskCount > 0 {
-            HStack(spacing: 3) {
-                Image(systemName: "checklist")
-                    .font(.system(size: 9.5, weight: .semibold))
-                Text("\(model.openTaskCount)")
+        case .meeting:
+            if let nextEvent = model.eventKit.upcomingEvents.first, nextEvent.endDate > Date() {
+                Text(nextEvent.statusLabel(relativeTo: Date()))
                     .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(NotchTheme.peachAction)
+                    .lineLimit(1)
+            } else {
+                Image(systemName: "calendar")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.5))
             }
-            .foregroundStyle(.white.opacity(0.75))
+
+        case .vitals:
+            if let battery = model.systemService.batteryPercent {
+                Text("\(model.systemService.isCharging ? "⚡" : "🔋") \(battery)%")
+                    .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(batteryVitalColor(battery, charging: model.systemService.isCharging))
+            } else {
+                Text("\(Int(round(model.systemService.diskFreeGB)))G")
+                    .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(diskVitalColor(model.systemService.diskFreeGB))
+            }
+
+        case .tasks:
+            if model.openTaskCount > 0 {
+                HStack(spacing: 3) {
+                    Image(systemName: "checklist")
+                        .font(.system(size: 9.5, weight: .semibold))
+                    Text("\(model.openTaskCount)")
+                        .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                }
+                .foregroundStyle(.white.opacity(0.75))
+            }
+
+        case .minimal:
+            EmptyView()
         }
     }
 
@@ -497,13 +630,35 @@ struct NotchRootView: View {
 
     // MARK: - Expanded Drawer Header & Body
 
+    private var shouldShowExpandedTelemetryBar: Bool {
+        model.timer.state != .idle
+            || model.settings.showExpandedVitals
+            || nextReminderOrDueTask != nil
+    }
+
+    private var nextReminderOrDueTask: TaskItem? {
+        model.tasks
+            .filter { !$0.isCompleted && $0.dueDate != nil }
+            .sorted { ($0.dueDate ?? .distantFuture) < ($1.dueDate ?? .distantFuture) }
+            .first
+    }
+
     private var expandedContent: some View {
         ZStack {
-            VStack(spacing: 10) {
+            VStack(spacing: 8) {
                 headerBar
                 Divider().overlay(Color.white.opacity(0.08))
+
+                if model.settings.expandedCountdownStyle == .hudStrip, shouldShowExpandedTelemetryBar {
+                    expandedTelemetryStrip
+                }
+
                 tabBody
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+                if model.settings.expandedCountdownStyle == .bottomRail, shouldShowExpandedTelemetryBar {
+                    expandedTelemetryStrip
+                }
             }
 
             if let overlay = model.activeUtilityOverlay {
@@ -640,29 +795,17 @@ struct NotchRootView: View {
 
             Spacer(minLength: 4)
 
-            if model.timer.state != .idle {
-                Button {
-                    model.activeUtilityOverlay = nil
-                    model.activeTab = .timer
-                    model.updateMirrorActivation()
-                } label: {
-                    HStack(spacing: 5) {
-                        Text(model.timer.formattedRemaining)
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(.white)
-                        AnimatedWaveformView(
-                            isActive: model.timer.state == .running,
-                            barColor: NotchTheme.skyWave,
-                            barWidth: 2,
-                            maxHeight: 10,
-                            spacing: 1.5
-                        )
-                    }
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(Color.white.opacity(0.09), in: Capsule())
+            if model.settings.expandedCountdownStyle == .headerPill {
+                if model.timer.state != .idle {
+                    headerCountdownPill
                 }
-                .buttonStyle(.plain)
+                if model.settings.showExpandedVitals {
+                    vitalsChipsRow(compact: true)
+                }
+            } else if model.settings.expandedCountdownStyle == .bottomRail,
+                      model.timer.state != .idle,
+                      model.activeTab == .timer {
+                EmptyView()
             }
 
             HStack(spacing: 2) {
@@ -783,5 +926,266 @@ struct NotchRootView: View {
         case .settings:
             SettingsTabView(model: model)
         }
+    }
+
+    // MARK: - Expanded Countdown & Clever Vital Stats Bars (Mocks A, B, C)
+
+    private var headerCountdownPill: some View {
+        let isRunning = model.timer.state == .running
+        let accent: Color = model.activeCountdownSourceIsReminder ? Color.amberGlow : NotchTheme.skyWave
+
+        return HStack(spacing: 5) {
+            Circle()
+                .fill(isRunning ? accent : Color.white.opacity(0.45))
+                .frame(width: 6, height: 6)
+
+            if let task = model.activeFocusTask {
+                Text(task.title)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.82))
+                    .lineLimit(1)
+                    .frame(maxWidth: 96, alignment: .leading)
+            }
+
+            Text(model.timer.formattedRemaining)
+                .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                .foregroundStyle(.white)
+
+            Button {
+                model.toggleFocusPlayPause()
+            } label: {
+                Image(systemName: isRunning ? "pause.fill" : "play.fill")
+                    .font(.system(size: 8.5, weight: .bold))
+                    .foregroundStyle(.black)
+                    .frame(width: 16, height: 16)
+                    .background(accent, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .help(isRunning ? "Pause countdown" : "Resume countdown")
+
+            if model.activeFocusTask != nil {
+                Button {
+                    model.completeActiveFocusTask()
+                } label: {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .frame(width: 16, height: 16)
+                        .background(Color.white.opacity(0.14), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Complete task")
+            }
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3.5)
+        .background(accent.opacity(0.15), in: Capsule())
+        .overlay(
+            Capsule().stroke(accent.opacity(0.35), lineWidth: 1)
+        )
+    }
+
+    private var expandedTelemetryStrip: some View {
+        let isTimerActive = model.timer.state != .idle
+        let isRunning = model.timer.state == .running
+        let accent: Color = model.activeCountdownSourceIsReminder ? Color.amberGlow : NotchTheme.skyWave
+
+        return HStack(spacing: 8) {
+            if isTimerActive {
+                HStack(spacing: 7) {
+                    Circle()
+                        .fill(isRunning ? accent : Color.amberGlow.opacity(0.75))
+                        .frame(width: 6.5, height: 6.5)
+
+                    Text(countdownStripTitle)
+                        .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .lineLimit(1)
+
+                    Text(model.timer.formattedRemaining)
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundStyle(isRunning ? accent : Color.amberGlow)
+
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Color.white.opacity(0.12))
+                            Capsule()
+                                .fill(accent)
+                                .frame(width: max(0, geo.size.width * model.timer.progress))
+                        }
+                    }
+                    .frame(width: 56, height: 4)
+
+                    Button {
+                        model.toggleFocusPlayPause()
+                    } label: {
+                        Label(isRunning ? "Pause" : "Resume", systemImage: isRunning ? "pause.fill" : "play.fill")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2.5)
+                            .background(accent, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        model.resetFocusTimer()
+                    } label: {
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.68))
+                            .frame(width: 18, height: 18)
+                            .background(Color.white.opacity(0.08), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Reset countdown")
+
+                    if model.activeFocusTask != nil {
+                        Button {
+                            model.completeActiveFocusTask()
+                        } label: {
+                            Label("Done", systemImage: "checkmark")
+                                .font(.system(size: 9.5, weight: .bold))
+                                .foregroundStyle(.black)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2.5)
+                                .background(NotchTheme.mintComplete, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            } else if let dueTask = nextReminderOrDueTask {
+                HStack(spacing: 6) {
+                    Image(systemName: dueTask.reminderLeadMinutes != nil ? "bell.badge.fill" : "calendar.badge.clock")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.amberGlow)
+
+                    let when = dueTask.dueCountdownLabel() ?? dueTask.formattedDueTime() ?? "Scheduled"
+                    Text("Next due: \(dueTask.title) · \(when)")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.76))
+                        .lineLimit(1)
+
+                    if let lead = dueTask.formattedReminderLead() {
+                        Text("(\(lead))")
+                            .font(.system(size: 9.5, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.45))
+                    }
+
+                    Button {
+                        model.startFocus(on: dueTask.id)
+                    } label: {
+                        Label("Start", systemImage: "play.fill")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(NotchTheme.sagePaper, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            } else {
+                HStack(spacing: 5) {
+                    Image(systemName: "timer")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.45))
+                    Text("Focus idle · \(model.openTaskCount) open tasks")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.55))
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            if model.settings.showExpandedVitals {
+                vitalsChipsRow(compact: false)
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 4.5)
+        .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    private var countdownStripTitle: String {
+        if let task = model.activeFocusTask {
+            if model.activeCountdownSourceIsReminder {
+                return "Due Reminder: \(task.title)"
+            }
+            return task.title
+        }
+        return model.timer.phase.label
+    }
+
+    private func vitalsChipsRow(compact: Bool) -> some View {
+        let sys = model.systemService
+        let cpuPct = Int(round(sys.cpuUsagePercent))
+        let ramRatio = sys.memoryTotalGB > 0 ? (sys.memoryUsedGB / sys.memoryTotalGB) : 0
+        let cpuTint = cpuVitalColor(cpuPct)
+        let ramTint = ramRatio >= 0.92 ? NotchTheme.coralAlert : (ramRatio >= 0.80 ? Color.amberGlow : .white.opacity(0.75))
+
+        return Button {
+            model.activeUtilityOverlay = nil
+            model.selectedHubSection = .overview
+            model.activeTab = .hub
+            model.updateMirrorActivation()
+        } label: {
+            HStack(spacing: compact ? 4 : 6) {
+                vitalChip(dotColor: cpuTint, text: "CPU \(cpuPct)%")
+                vitalChip(dotColor: ramTint, text: String(format: "%.1fG", sys.memoryUsedGB))
+
+                if let bat = sys.batteryPercent {
+                    vitalChip(
+                        dotColor: batteryVitalColor(bat, charging: sys.isCharging),
+                        text: "\(sys.isCharging ? "⚡" : "🔋")\(bat)%"
+                    )
+                }
+
+                if !compact {
+                    vitalChip(
+                        dotColor: diskVitalColor(sys.diskFreeGB),
+                        text: "\(Int(round(sys.diskFreeGB)))G free"
+                    )
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .help("System Vitals — click to open Hub Dashboard")
+    }
+
+    private func vitalChip(dotColor: Color, text: String) -> some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(dotColor)
+                .frame(width: 5, height: 5)
+            Text(text)
+                .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.82))
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2.5)
+        .background(Color.white.opacity(0.07), in: Capsule())
+    }
+
+    private func cpuVitalColor(_ cpu: Int) -> Color {
+        if cpu >= 85 { return NotchTheme.coralAlert }
+        if cpu >= 65 { return Color.amberGlow }
+        return NotchTheme.skyWave
+    }
+
+    private func batteryVitalColor(_ percent: Int, charging: Bool) -> Color {
+        if charging { return NotchTheme.skyWave }
+        if percent <= 12 { return NotchTheme.coralAlert }
+        if percent <= 25 { return Color.amberGlow }
+        return NotchTheme.mintComplete
+    }
+
+    private func diskVitalColor(_ freeGB: Double) -> Color {
+        if freeGB <= 10 { return NotchTheme.coralAlert }
+        if freeGB <= 25 { return Color.amberGlow }
+        return .white.opacity(0.55)
     }
 }

@@ -183,6 +183,7 @@ public struct TaskItem: Identifiable, Codable, Equatable, Sendable {
     public var snoozedUntil: Date?
     public var focusedMinutes: Int
     public var targetMinutes: Int?
+    public var reminderLeadMinutes: Int?
 
     public init(
         id: UUID = UUID(),
@@ -199,7 +200,8 @@ public struct TaskItem: Identifiable, Codable, Equatable, Sendable {
         recurrence: TaskRecurrence = .none,
         snoozedUntil: Date? = nil,
         focusedMinutes: Int = 0,
-        targetMinutes: Int? = nil
+        targetMinutes: Int? = nil,
+        reminderLeadMinutes: Int? = nil
     ) {
         self.id = id
         self.title = title
@@ -216,6 +218,7 @@ public struct TaskItem: Identifiable, Codable, Equatable, Sendable {
         self.snoozedUntil = snoozedUntil
         self.focusedMinutes = focusedMinutes
         self.targetMinutes = targetMinutes
+        self.reminderLeadMinutes = reminderLeadMinutes
     }
 
     enum CodingKeys: String, CodingKey {
@@ -234,6 +237,7 @@ public struct TaskItem: Identifiable, Codable, Equatable, Sendable {
         case snoozedUntil
         case focusedMinutes
         case targetMinutes
+        case reminderLeadMinutes
     }
 
     public init(from decoder: Decoder) throws {
@@ -254,6 +258,17 @@ public struct TaskItem: Identifiable, Codable, Equatable, Sendable {
         snoozedUntil = try container.decodeIfPresent(Date.self, forKey: .snoozedUntil)
         focusedMinutes = try container.decodeIfPresent(Int.self, forKey: .focusedMinutes) ?? 0
         targetMinutes = try container.decodeIfPresent(Int.self, forKey: .targetMinutes)
+        reminderLeadMinutes = try container.decodeIfPresent(Int.self, forKey: .reminderLeadMinutes)
+    }
+
+    public func reminderWindowStartDate() -> Date? {
+        guard !isCompleted, let dueDate, let lead = reminderLeadMinutes, lead >= 0 else { return nil }
+        return dueDate.addingTimeInterval(-TimeInterval(lead * 60))
+    }
+
+    public func formattedReminderLead() -> String? {
+        guard let lead = reminderLeadMinutes, lead >= 0 else { return nil }
+        return lead == 0 ? "At due" : "\(lead)m before"
     }
 
     public func formattedDueTime() -> String? {
@@ -837,6 +852,44 @@ public enum MusicPlayerPreference: String, Codable, CaseIterable, Sendable, Iden
     }
 }
 
+public enum CollapsedDisplayMode: String, CaseIterable, Codable, Sendable, Identifiable {
+    case automatic
+    case music
+    case countdown
+    case meeting
+    case vitals
+    case minimal
+
+    public var id: String { rawValue }
+
+    public var label: String {
+        switch self {
+        case .automatic: return "Auto (Smart)"
+        case .music: return "Music Player"
+        case .countdown: return "Task Countdown"
+        case .meeting: return "Next Meeting"
+        case .vitals: return "Mac Vitals"
+        case .minimal: return "Minimal (Owl)"
+        }
+    }
+}
+
+public enum ExpandedCountdownStyle: String, CaseIterable, Codable, Sendable, Identifiable {
+    case bottomRail
+    case hudStrip
+    case headerPill
+
+    public var id: String { rawValue }
+
+    public var label: String {
+        switch self {
+        case .bottomRail: return "Bottom Rail (Default)"
+        case .hudStrip: return "Slim HUD Strip"
+        case .headerPill: return "Header Pill"
+        }
+    }
+}
+
 public struct AppSettings: Codable, Equatable, Sendable {
     public var hoverToExpand: Bool
     public var hoverDelayMs: Int
@@ -848,6 +901,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var showTransientLiveActivities: Bool
     public var showMediaInNotch: Bool
     public var showMicIndicatorInNotch: Bool
+    public var collapsedDisplayMode: CollapsedDisplayMode
+    public var expandedCountdownStyle: ExpandedCountdownStyle
+    public var showExpandedVitals: Bool
     public var preferredMusicPlayer: MusicPlayerPreference
     public var autoPauseMediaOnJoin: Bool
     public var createMeetingNoteOnJoin: Bool
@@ -893,6 +949,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
         showTransientLiveActivities: Bool = true,
         showMediaInNotch: Bool = true,
         showMicIndicatorInNotch: Bool = true,
+        collapsedDisplayMode: CollapsedDisplayMode = .automatic,
+        expandedCountdownStyle: ExpandedCountdownStyle = .bottomRail,
+        showExpandedVitals: Bool = true,
         preferredMusicPlayer: MusicPlayerPreference = .automatic,
         autoPauseMediaOnJoin: Bool = true,
         createMeetingNoteOnJoin: Bool = false,
@@ -937,6 +996,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.showTransientLiveActivities = showTransientLiveActivities
         self.showMediaInNotch = showMediaInNotch
         self.showMicIndicatorInNotch = showMicIndicatorInNotch
+        self.collapsedDisplayMode = collapsedDisplayMode
+        self.expandedCountdownStyle = expandedCountdownStyle
+        self.showExpandedVitals = showExpandedVitals
         self.preferredMusicPlayer = preferredMusicPlayer
         self.autoPauseMediaOnJoin = autoPauseMediaOnJoin
         self.createMeetingNoteOnJoin = createMeetingNoteOnJoin
@@ -983,6 +1045,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case showTransientLiveActivities
         case showMediaInNotch
         case showMicIndicatorInNotch
+        case collapsedDisplayMode
+        case expandedCountdownStyle
+        case showExpandedVitals
         case preferredMusicPlayer
         case autoPauseMediaOnJoin
         case createMeetingNoteOnJoin
@@ -1030,6 +1095,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
         showTransientLiveActivities = try c.decodeIfPresent(Bool.self, forKey: .showTransientLiveActivities) ?? true
         showMediaInNotch = try c.decodeIfPresent(Bool.self, forKey: .showMediaInNotch) ?? true
         showMicIndicatorInNotch = try c.decodeIfPresent(Bool.self, forKey: .showMicIndicatorInNotch) ?? true
+        collapsedDisplayMode = try c.decodeIfPresent(CollapsedDisplayMode.self, forKey: .collapsedDisplayMode) ?? .automatic
+        expandedCountdownStyle = try c.decodeIfPresent(ExpandedCountdownStyle.self, forKey: .expandedCountdownStyle) ?? .bottomRail
+        showExpandedVitals = try c.decodeIfPresent(Bool.self, forKey: .showExpandedVitals) ?? true
         preferredMusicPlayer = try c.decodeIfPresent(MusicPlayerPreference.self, forKey: .preferredMusicPlayer) ?? .automatic
         autoPauseMediaOnJoin = try c.decodeIfPresent(Bool.self, forKey: .autoPauseMediaOnJoin) ?? true
         createMeetingNoteOnJoin = try c.decodeIfPresent(Bool.self, forKey: .createMeetingNoteOnJoin) ?? false

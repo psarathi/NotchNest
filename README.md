@@ -4,6 +4,10 @@ An original, clean-room **Intel (`x86_64`) native** macOS utility built with Swi
 
 ## Features
 - **Virtual & Hardware Notch Adaptive**: Centers a dark curved notch pill in the menu bar on non-notched Intel Macs and external displays, and adapts cleanly on hardware-notched MacBooks.
+- **Configurable Collapsed & Expanded Notch UI**:
+  - **Collapsed Display Modes**: Choose what sits in the collapsed notch (`Auto (Smart)`, `Music Player`, `Task Countdown`, `Next Meeting`, `Mac Vitals`, or `Minimal`) via Settings or the Owl menu.
+  - **Due Dates, Pre-Due Auto-Countdowns & Pauseable Controls**: Attach due dates & reminder lead times (`At due`, `5m`, `10m`, `15m`, `30m before`, or `remind 15m before` in NL input) so tasks auto-start a pauseable countdown on window entry, shown in both the collapsed pill (with hover `⏸`/`▶`) and expanded drawer.
+  - **Clever Expanded Telemetry (`Bottom Rail` default, `Slim HUD Strip`, or `Header Pill`)**: Surfaces color-coded `CPU`, `RAM`, `Battery`, and `Disk` chips whenever the notch is expanded (one-click jump to **Hub**).
 - **Persistent & Transient Live Activities**:
   - **Calendar & Tasks**: Upcoming non-all-day meetings with automatic Zoom / Google Meet / Teams / Webex join buttons + optional call handoff (pause media / pre-call camera preview / meeting note), leave-by travel-time hints, pinned tasks, and 20-20-20 eye-break reminders (`⌥S` snooze).
   - **Media, Bluetooth, System HUD, Pomodoro & Unlock**: Collapsed notch Now Playing strip with hover-safe inline **Play/Pause** & **Next** controls, plus transient popups for track changes, Bluetooth gear batteries, Mic Mute Guard (`⌥M` + notch muted badge), Never Sleep & Screen Privacy toggles, Window Snap feedback, Focus completion, and Screen Unlock summaries.

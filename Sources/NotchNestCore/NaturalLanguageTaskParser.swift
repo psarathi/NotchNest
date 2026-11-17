@@ -9,6 +9,7 @@ public struct ParsedTaskDraft: Equatable, Sendable {
     public var projectTag: String?
     public var recurrence: TaskRecurrence
     public var targetMinutes: Int?
+    public var reminderLeadMinutes: Int?
     public var hasStructuredMetadata: Bool
 
     public init(
@@ -20,6 +21,7 @@ public struct ParsedTaskDraft: Equatable, Sendable {
         projectTag: String? = nil,
         recurrence: TaskRecurrence = .none,
         targetMinutes: Int? = nil,
+        reminderLeadMinutes: Int? = nil,
         hasStructuredMetadata: Bool = false
     ) {
         self.title = title
@@ -30,6 +32,7 @@ public struct ParsedTaskDraft: Equatable, Sendable {
         self.projectTag = projectTag
         self.recurrence = recurrence
         self.targetMinutes = targetMinutes
+        self.reminderLeadMinutes = reminderLeadMinutes
         self.hasStructuredMetadata = hasStructuredMetadata
     }
 
@@ -72,6 +75,9 @@ public struct ParsedTaskDraft: Equatable, Sendable {
         }
         if let targetMinutes {
             parts.append("⏱ \(targetMinutes)m")
+        }
+        if let reminderLeadMinutes {
+            parts.append(reminderLeadMinutes == 0 ? "🔔 at due" : "🔔 \(reminderLeadMinutes)m before")
         }
 
         return "\"\(title)\" planned for \(parts.joined(separator: " · "))"
@@ -116,6 +122,7 @@ public enum NaturalLanguageTaskParser {
         var parsedMinute: Int?
         var relativeDueDate: Date?
         var targetMinutes: Int?
+        var reminderLeadMinutes: Int?
         var matchedAnything = false
 
         // 1. Hashtags (#Work, #Personal)
@@ -189,6 +196,13 @@ public enum NaturalLanguageTaskParser {
                 matchedAnything = true
                 working.removeSubrange(relRange)
             }
+        }
+
+        // 4a. Reminder lead time ("remind 15m before", "15m before", "remind at due")
+        if let remMatch = matchReminderLeadMinutes(in: working) {
+            reminderLeadMinutes = remMatch.minutes
+            matchedAnything = true
+            working.removeSubrange(remMatch.range)
         }
 
         // 4b. Target countdown duration ("45m", "for 45 min", "~30m", "(15 min)")
@@ -302,8 +316,28 @@ public enum NaturalLanguageTaskParser {
             projectTag: projectTag,
             recurrence: recurrence,
             targetMinutes: targetMinutes,
+            reminderLeadMinutes: reminderLeadMinutes,
             hasStructuredMetadata: matchedAnything
         )
+    }
+
+    private static func matchReminderLeadMinutes(in text: String) -> (minutes: Int, range: Range<String.Index>)? {
+        let nsText = text as NSString
+        if let range = text.range(of: #"(?i)(?:^|\s)(?:remind(?:er)?\s+)?at\s+due(?:\s+time)?(?=\s|$)"#, options: .regularExpression) {
+            return (0, range)
+        }
+        guard let regex = try? NSRegularExpression(
+            pattern: #"(?:^|\s)(?:(?:remind(?:er)?|alert)\s+)?(\d{1,3})\s*(?:m|min|mins|minute|minutes)\s+(?:before|early|prior|reminder)(?=\s|$)"#,
+            options: [.caseInsensitive]
+        ),
+        let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: nsText.length)),
+        match.range(at: 1).location != NSNotFound,
+        let fullRange = Range(match.range, in: text) else {
+            return nil
+        }
+        let raw = nsText.substring(with: match.range(at: 1))
+        guard let mins = Int(raw), (0...180).contains(mins) else { return nil }
+        return (mins, fullRange)
     }
 
     private static func matchTargetDuration(in text: String) -> (minutes: Int, range: Range<String.Index>)? {

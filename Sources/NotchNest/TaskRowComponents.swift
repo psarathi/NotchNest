@@ -39,6 +39,31 @@ struct TaskActionsMenu: View {
                     }
                 }
 
+                Menu("Pre-Due Reminder") {
+                    Button("None") {
+                        model.updateTask(
+                            item.id,
+                            title: item.title,
+                            updateReminderLeadMinutes: true,
+                            reminderLeadMinutes: nil
+                        )
+                    }
+                    Divider()
+                    ForEach([0, 5, 10, 15, 30], id: \.self) { mins in
+                        Button(mins == 0 ? "At due time" : "\(mins) min before") {
+                            let resolvedDue = item.dueDate ?? Date().addingTimeInterval(3600)
+                            model.updateTask(
+                                item.id,
+                                title: item.title,
+                                updateDueDate: item.dueDate == nil,
+                                dueDate: resolvedDue,
+                                updateReminderLeadMinutes: true,
+                                reminderLeadMinutes: mins
+                            )
+                        }
+                    }
+                }
+
                 Button {
                     model.pinTaskAsLiveNudge(item.id)
                 } label: {
@@ -107,6 +132,8 @@ struct TaskInlineEditorRow: View {
     @Binding var bucket: TaskBucket
     @Binding var dayKey: String?
     @Binding var targetMinutes: Int?
+    @Binding var dueDate: Date?
+    @Binding var reminderLeadMinutes: Int?
     let columns: [WeekPlanColumn]
     let onRequestFocus: () -> Void
     let onSave: () -> Void
@@ -117,6 +144,14 @@ struct TaskInlineEditorRow: View {
     @FocusState private var isFocused: Bool
 
     private static let durationOptions: [Int?] = [nil, 15, 25, 45, 60]
+    private static let reminderOptions: [(String, Int?)] = [
+        ("Off", nil),
+        ("At due", 0),
+        ("5m", 5),
+        ("10m", 10),
+        ("15m", 15),
+        ("30m", 30)
+    ]
 
     private static let shortDayFmt: DateFormatter = {
         let f = DateFormatter()
@@ -221,6 +256,93 @@ struct TaskInlineEditorRow: View {
                                             ? NotchTheme.sageBadgeFill
                                             : (isDarkSurface ? Color.white.opacity(0.08) : Color.black.opacity(0.08))
                                     )
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Spacer()
+            }
+
+            HStack(spacing: 5) {
+                if let currentDue = dueDate {
+                    DatePicker(
+                        "",
+                        selection: Binding(
+                            get: { currentDue },
+                            set: { dueDate = $0 }
+                        ),
+                        displayedComponents: [.date, .hourAndMinute]
+                    )
+                    .labelsHidden()
+                    .datePickerStyle(.compact)
+                    .controlSize(.mini)
+                    .colorScheme(isDarkSurface ? .dark : .light)
+
+                    Menu {
+                        ForEach(Self.reminderOptions.indices, id: \.self) { idx in
+                            let opt = Self.reminderOptions[idx]
+                            Button {
+                                reminderLeadMinutes = opt.1
+                            } label: {
+                                HStack {
+                                    Text(opt.0 == "Off" ? "No reminder" : (opt.0 == "At due" ? "At due time" : "\(opt.0) before"))
+                                    if reminderLeadMinutes == opt.1 {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        let remLabel = reminderLeadMinutes.map { $0 == 0 ? "At due" : "\($0)m" } ?? "Off"
+                        Label(remLabel, systemImage: "bell.badge")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(
+                                reminderLeadMinutes != nil
+                                    ? .white
+                                    : (isDarkSurface ? .white.opacity(0.7) : NotchTheme.sageInk)
+                            )
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2.5)
+                            .background(
+                                Capsule()
+                                    .fill(
+                                        reminderLeadMinutes != nil
+                                            ? NotchTheme.sageBadgeFill
+                                            : (isDarkSurface ? Color.white.opacity(0.08) : Color.black.opacity(0.08))
+                                    )
+                            )
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+
+                    Button {
+                        dueDate = nil
+                        reminderLeadMinutes = nil
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(isDarkSurface ? .white.opacity(0.55) : NotchTheme.sageMuted)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear due date")
+                } else {
+                    Button {
+                        let nextHour = Calendar.current.date(byAdding: .hour, value: 1, to: Date()) ?? Date()
+                        dueDate = nextHour
+                        if reminderLeadMinutes == nil {
+                            reminderLeadMinutes = 15
+                        }
+                    } label: {
+                        Label("Add Due & Reminder", systemImage: "calendar.badge.clock")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(isDarkSurface ? .white.opacity(0.75) : NotchTheme.sageInk.opacity(0.8))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(
+                                Capsule()
+                                    .fill(isDarkSurface ? Color.white.opacity(0.08) : Color.black.opacity(0.08))
                             )
                     }
                     .buttonStyle(.plain)

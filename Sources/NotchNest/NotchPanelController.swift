@@ -422,11 +422,20 @@ final class NotchPanelController {
     }
 
     private var isCollapsedMediaVisible: Bool {
-        !model.isExpanded
-            && !model.showsLiveActivityPill
-            && model.settings.showMediaInNotch
-            && model.mediaService.currentTrack != nil
-            && !(model.settings.showTimerInNotch && model.timer.state != .idle)
+        guard !model.isExpanded && !model.showsLiveActivityPill else { return false }
+        switch model.settings.collapsedDisplayMode {
+        case .automatic:
+            if model.settings.showTimerInNotch && model.timer.state != .idle {
+                return true
+            }
+            return model.settings.showMediaInNotch && model.mediaService.currentTrack != nil
+        case .music:
+            return model.mediaService.currentTrack != nil
+        case .countdown:
+            return true
+        case .meeting, .vitals, .minimal:
+            return false
+        }
     }
 
     private func handleMouseEntered() {
@@ -674,6 +683,40 @@ final class NotchPanelController {
             }
             menu.addItem(item)
         }
+
+        menu.addItem(.separator())
+
+        let collapsedItem = NSMenuItem(title: "Collapsed Notch Shows", action: nil, keyEquivalent: "")
+        let collapsedSub = NSMenu()
+        for mode in CollapsedDisplayMode.allCases {
+            let item = ClosureMenuItem(title: mode.label) { [weak self] in
+                guard let self else { return }
+                self.menuActionSelected = true
+                self.model.settings.collapsedDisplayMode = mode
+            }
+            if model.settings.collapsedDisplayMode == mode {
+                item.state = .on
+            }
+            collapsedSub.addItem(item)
+        }
+        collapsedItem.submenu = collapsedSub
+        menu.addItem(collapsedItem)
+
+        let expandedStyleItem = NSMenuItem(title: "Expanded Telemetry Layout", action: nil, keyEquivalent: "")
+        let expandedStyleSub = NSMenu()
+        for style in ExpandedCountdownStyle.allCases {
+            let item = ClosureMenuItem(title: style.label) { [weak self] in
+                guard let self else { return }
+                self.menuActionSelected = true
+                self.model.settings.expandedCountdownStyle = style
+            }
+            if model.settings.expandedCountdownStyle == style {
+                item.state = .on
+            }
+            expandedStyleSub.addItem(item)
+        }
+        expandedStyleItem.submenu = expandedStyleSub
+        menu.addItem(expandedStyleItem)
 
         menu.addItem(.separator())
 

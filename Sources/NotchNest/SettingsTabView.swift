@@ -55,6 +55,7 @@ struct SettingsTabView: View {
             Toggle("Show Media / Bluetooth / HUD popups", isOn: $model.settings.showTransientLiveActivities)
             Toggle("Show Now Playing in notch", isOn: $model.settings.showMediaInNotch)
             Toggle("Show mic mute badge in notch", isOn: $model.settings.showMicIndicatorInNotch)
+            Toggle("Show computer vitals when expanded", isOn: $model.settings.showExpandedVitals)
             Toggle("Show focus timer beside notch", isOn: $model.settings.showTimerInNotch)
             Toggle("Show next meeting in notch", isOn: $model.settings.showNextEventInNotch)
             Toggle("Hide notch in screen recordings", isOn: $model.settings.hideInScreenCapture)
@@ -91,6 +92,22 @@ struct SettingsTabView: View {
                 Slider(value: $model.settings.collapsedWidth, in: 176...290, step: 4)
                     .tint(NotchTheme.sagePaper)
             }
+
+            Picker("Collapsed notch", selection: $model.settings.collapsedDisplayMode) {
+                ForEach(CollapsedDisplayMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .pickerStyle(.menu)
+            .font(.system(size: 11))
+
+            Picker("Expanded telemetry", selection: $model.settings.expandedCountdownStyle) {
+                ForEach(ExpandedCountdownStyle.allCases) { style in
+                    Text(style.label).tag(style)
+                }
+            }
+            .pickerStyle(.menu)
+            .font(.system(size: 11))
 
             Picker("Display", selection: $model.settings.displayMode) {
                 ForEach(DisplaySelectionMode.allCases, id: \.self) { mode in

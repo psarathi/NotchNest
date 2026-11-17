@@ -23,6 +23,8 @@ struct TodayTabView: View {
     @State private var editBucket: TaskBucket = .today
     @State private var editDayKey: String?
     @State private var editTargetMinutes: Int?
+    @State private var editDueDate: Date?
+    @State private var editReminderLeadMinutes: Int?
     @State private var dictationTarget: WorkspaceDictationTarget?
     @State private var notepadFeedback: String?
 
@@ -492,6 +494,8 @@ struct TodayTabView: View {
                 bucket: $editBucket,
                 dayKey: $editDayKey,
                 targetMinutes: $editTargetMinutes,
+                dueDate: $editDueDate,
+                reminderLeadMinutes: $editReminderLeadMinutes,
                 columns: model.weekPlanColumns(),
                 onRequestFocus: onRequestFocus,
                 onSave: {
@@ -502,7 +506,11 @@ struct TodayTabView: View {
                         bucket: editBucket,
                         dayKey: editDayKey,
                         updateTargetMinutes: true,
-                        targetMinutes: editTargetMinutes
+                        targetMinutes: editTargetMinutes,
+                        updateDueDate: true,
+                        dueDate: editDueDate,
+                        updateReminderLeadMinutes: true,
+                        reminderLeadMinutes: editReminderLeadMinutes
                     )
                     editingTaskID = nil
                 },
@@ -576,7 +584,9 @@ struct TodayTabView: View {
                             }
 
                             if let time = item.formattedDueTime() {
-                                Label(dueCountdown.map { "\(time) (\($0))" } ?? time, systemImage: "bell")
+                                let countdownSuffix = dueCountdown.map { " (\($0))" } ?? ""
+                                let leadSuffix = item.formattedReminderLead().map { " · \($0)" } ?? ""
+                                Label("\(time)\(countdownSuffix)\(leadSuffix)", systemImage: item.reminderLeadMinutes != nil ? "bell.badge" : "bell")
                                     .font(.system(size: 9, weight: .medium))
                                     .foregroundStyle(NotchTheme.sageMuted)
                                     .lineLimit(1)
@@ -672,6 +682,8 @@ struct TodayTabView: View {
         editBucket = item.scheduledBucket
         editDayKey = item.scheduledDayKey
         editTargetMinutes = item.targetMinutes
+        editDueDate = item.dueDate
+        editReminderLeadMinutes = item.reminderLeadMinutes
     }
 
     private func submitDraftTask() {
