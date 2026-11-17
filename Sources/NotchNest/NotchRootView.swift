@@ -118,8 +118,14 @@ struct NotchRootView: View {
             if model.settings.showTimerInNotch && model.timer.state != .idle {
                 return .timer
             }
-            if model.settings.showMediaInNotch && model.mediaService.currentTrack != nil {
+            let isMusicPlaying = model.settings.showMediaInNotch && (model.mediaService.currentTrack?.isPlaying == true)
+            if isMusicPlaying {
                 return .music
+            }
+            if let dueTask = nextScheduledDueTask,
+               let dueDate = dueTask.dueDate,
+               dueDate.timeIntervalSinceNow <= 2 * 3600 && dueDate.timeIntervalSinceNow >= -300 {
+                return .timer
             }
             if model.settings.showNextEventInNotch,
                let nextEvent = model.eventKit.upcomingEvents.first,
@@ -233,7 +239,10 @@ struct NotchRootView: View {
 
     private var nextScheduledDueTask: TaskItem? {
         model.tasks
-            .filter { !$0.isCompleted && $0.dueDate != nil }
+            .filter { item in
+                guard !item.isCompleted, let due = item.dueDate else { return false }
+                return due.timeIntervalSinceNow >= -3_600
+            }
             .sorted { ($0.dueDate ?? .distantFuture) < ($1.dueDate ?? .distantFuture) }
             .first
     }
@@ -262,6 +271,8 @@ struct NotchRootView: View {
                     Text(model.timer.formattedRemaining)
                         .font(.system(size: 11, weight: .semibold, design: .monospaced))
                         .foregroundStyle(model.timer.state == .paused ? Color.amberGlow : .white)
+                        .lineLimit(1)
+                        .fixedSize()
 
                     AnimatedWaveformView(
                         isActive: model.timer.state == .running,
@@ -271,6 +282,7 @@ struct NotchRootView: View {
                         spacing: 1.8
                     )
                 }
+                .fixedSize()
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(Color.white.opacity(0.09), in: Capsule())
@@ -282,6 +294,8 @@ struct NotchRootView: View {
                     Text(countdown)
                         .font(.system(size: 10.5, weight: .semibold, design: .rounded))
                         .foregroundStyle(NotchTheme.peachAction)
+                        .lineLimit(1)
+                        .fixedSize()
                     if model.isHoveringNotch {
                         Button {
                             model.startFocus(on: dueTask.id)
@@ -295,12 +309,15 @@ struct NotchRootView: View {
                         .buttonStyle(.plain)
                     }
                 }
+                .fixedSize()
                 .contentShape(Rectangle())
                 .onTapGesture {}
             } else {
                 Text("\(model.settings.focusMinutes)m")
                     .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.7))
+                    .lineLimit(1)
+                    .fixedSize()
             }
 
         case .music:

@@ -336,35 +336,51 @@ struct WeekTabView: View {
                         .strikethrough(item.isCompleted)
                         .lineLimit(2)
 
-                    if item.dueDate != nil || item.projectTag != nil || item.recurrence != .none || item.detectedMeetingURL != nil {
-                        HStack(spacing: 4) {
-                            if let time = item.formattedDueTime() {
-                                Text(time)
-                                    .font(.system(size: 9.5, weight: .medium))
-                                    .foregroundStyle(isTodayColumn ? NotchTheme.sageMuted : .white.opacity(0.55))
-                            }
-                            if let tag = item.projectTag {
-                                Text("#\(tag)")
-                                    .font(.system(size: 9.5, weight: .medium))
-                                    .foregroundStyle(isTodayColumn ? NotchTheme.sageBadgeFill : NotchTheme.lavenderSoft)
-                            }
-                            if let rec = item.recurrence.label {
-                                Text(rec)
-                                    .font(.system(size: 9, weight: .medium))
-                                    .foregroundStyle(isTodayColumn ? NotchTheme.sageMuted : .white.opacity(0.45))
-                            }
-                            if let joinURL = item.detectedMeetingURL {
-                                Button {
-                                    model.joinMeeting(url: joinURL, title: item.title)
-                                } label: {
-                                    Label("Join \(MeetingLinkExtractor.serviceLabel(for: joinURL))", systemImage: "video.fill")
-                                        .font(.system(size: 9, weight: .bold))
-                                        .foregroundStyle(isTodayColumn ? .white : .black)
-                                        .padding(.horizontal, 5)
-                                        .padding(.vertical, 1)
-                                        .background(isTodayColumn ? NotchTheme.sageBadgeFill : NotchTheme.peachAction, in: Capsule())
+                    if item.dueDate != nil || item.targetMinutes != nil || item.projectTag != nil || item.recurrence != .none || item.detectedMeetingURL != nil {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 4) {
+                                if let mins = item.targetMinutes {
+                                    Text("⏱ \(mins)m")
+                                        .font(.system(size: 9.5, weight: .medium))
+                                        .foregroundStyle(isTodayColumn ? NotchTheme.sageMuted : .white.opacity(0.6))
+                                        .lineLimit(1)
+                                        .fixedSize()
                                 }
-                                .buttonStyle(.plain)
+                                if let time = item.formattedDueTime() {
+                                    Text(time)
+                                        .font(.system(size: 9.5, weight: .medium))
+                                        .foregroundStyle(isTodayColumn ? NotchTheme.sageMuted : .white.opacity(0.55))
+                                        .lineLimit(1)
+                                        .fixedSize()
+                                }
+                                if let tag = item.projectTag {
+                                    Text("#\(tag)")
+                                        .font(.system(size: 9.5, weight: .medium))
+                                        .foregroundStyle(isTodayColumn ? NotchTheme.sageBadgeFill : NotchTheme.lavenderSoft)
+                                        .lineLimit(1)
+                                        .fixedSize()
+                                }
+                                if let rec = item.recurrence.label {
+                                    Text(rec)
+                                        .font(.system(size: 9, weight: .medium))
+                                        .foregroundStyle(isTodayColumn ? NotchTheme.sageMuted : .white.opacity(0.45))
+                                        .lineLimit(1)
+                                        .fixedSize()
+                                }
+                                if let joinURL = item.detectedMeetingURL {
+                                    Button {
+                                        model.joinMeeting(url: joinURL, title: item.title)
+                                    } label: {
+                                        Label("Join \(MeetingLinkExtractor.serviceLabel(for: joinURL))", systemImage: "video.fill")
+                                            .font(.system(size: 9, weight: .bold))
+                                            .foregroundStyle(isTodayColumn ? .white : .black)
+                                            .padding(.horizontal, 5)
+                                            .padding(.vertical, 1)
+                                            .background(isTodayColumn ? NotchTheme.sageBadgeFill : NotchTheme.peachAction, in: Capsule())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .fixedSize()
+                                }
                             }
                         }
                     }

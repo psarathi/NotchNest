@@ -551,73 +551,124 @@ struct TodayTabView: View {
                         .truncationMode(.tail)
 
                     if item.dueDate != nil || item.projectTag != nil || item.priority == .high || item.recurrence != .none || item.focusedMinutes > 0 || item.targetMinutes != nil || isLinkedTask || savedRemaining != nil || item.detectedMeetingURL != nil {
-                        HStack(spacing: 4) {
-                            if isRunningHere {
-                                Label(model.timer.formattedRemaining, systemImage: "timer")
-                                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 5) {
+                                if isRunningHere {
+                                    HStack(spacing: 3) {
+                                        Image(systemName: "timer")
+                                            .font(.system(size: 8.5, weight: .bold))
+                                        Text(model.timer.formattedRemaining)
+                                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                    }
+                                    .lineLimit(1)
+                                    .fixedSize()
                                     .foregroundStyle(.white)
+                                    .padding(.horizontal, 5.5)
+                                    .padding(.vertical, 1.5)
+                                    .background(NotchTheme.sageBadgeFill, in: Capsule())
+                                } else if isPausedCountdown {
+                                    let rem = isLinkedTask ? model.timer.remainingSeconds : (savedRemaining ?? 0)
+                                    HStack(spacing: 3) {
+                                        Image(systemName: "pause.circle.fill")
+                                            .font(.system(size: 8.5))
+                                        Text(Self.formatCountdown(rem))
+                                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                                    }
+                                    .lineLimit(1)
+                                    .fixedSize()
+                                    .foregroundStyle(NotchTheme.sageBadgeFill)
                                     .padding(.horizontal, 5)
                                     .padding(.vertical, 1)
-                                    .background(NotchTheme.sageBadgeFill, in: Capsule())
-                            } else if isPausedCountdown {
-                                let rem = isLinkedTask ? model.timer.remainingSeconds : (savedRemaining ?? 0)
-                                Label(Self.formatCountdown(rem), systemImage: "pause.circle")
-                                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                                    .foregroundStyle(NotchTheme.sageBadgeFill)
-                            } else if let targetMins = item.targetMinutes {
-                                Label("\(targetMins)m", systemImage: "timer")
-                                    .font(.system(size: 9, weight: .medium))
-                                    .foregroundStyle(NotchTheme.sageMuted)
-                            }
-
-                            if item.focusedMinutes > 0 {
-                                Text("Focused · \(item.focusedMinutes)m")
-                                    .font(.system(size: 9, weight: .medium))
-                                    .foregroundStyle(NotchTheme.sageMuted)
+                                    .background(Color.black.opacity(0.08), in: Capsule())
+                                } else if let targetMins = item.targetMinutes {
+                                    HStack(spacing: 2.5) {
+                                        Image(systemName: "timer")
+                                            .font(.system(size: 8.5))
+                                        Text("\(targetMins)m")
+                                            .font(.system(size: 9, weight: .medium))
+                                    }
                                     .lineLimit(1)
-                            }
+                                    .fixedSize()
+                                    .foregroundStyle(NotchTheme.sageMuted)
+                                }
 
-                            if item.priority == .high && !item.isCompleted {
-                                Label("High", systemImage: "flag.fill")
-                                    .font(.system(size: 9, weight: .semibold))
+                                if item.focusedMinutes > 0 {
+                                    Text("Focused · \(item.focusedMinutes)m")
+                                        .font(.system(size: 9, weight: .medium))
+                                        .foregroundStyle(NotchTheme.sageMuted)
+                                        .lineLimit(1)
+                                        .fixedSize()
+                                }
+
+                                if item.priority == .high && !item.isCompleted {
+                                    HStack(spacing: 2.5) {
+                                        Image(systemName: "flag.fill")
+                                            .font(.system(size: 8.5))
+                                        Text("High")
+                                            .font(.system(size: 9, weight: .semibold))
+                                    }
+                                    .lineLimit(1)
+                                    .fixedSize()
                                     .foregroundStyle(Color(red: 0.65, green: 0.22, blue: 0.14))
-                            }
+                                }
 
-                            if let time = item.formattedDueTime() {
-                                let countdownSuffix = dueCountdown.map { " (\($0))" } ?? ""
-                                let leadSuffix = item.formattedReminderLead().map { " · \($0)" } ?? ""
-                                Label("\(time)\(countdownSuffix)\(leadSuffix)", systemImage: item.reminderLeadMinutes != nil ? "bell.badge" : "bell")
-                                    .font(.system(size: 9, weight: .medium))
-                                    .foregroundStyle(NotchTheme.sageMuted)
+                                if let time = item.formattedDueTime() {
+                                    let leadShort = item.reminderLeadMinutes.map { $0 == 0 ? " · at due" : " · -\($0)m" } ?? ""
+                                    let countdownPart = dueCountdown.map { " (\($0))" } ?? ""
+                                    HStack(spacing: 2.5) {
+                                        Image(systemName: item.reminderLeadMinutes != nil ? "bell.badge" : "bell")
+                                            .font(.system(size: 8.5))
+                                        Text("\(time)\(countdownPart)\(leadShort)")
+                                            .font(.system(size: 9, weight: .medium))
+                                    }
                                     .lineLimit(1)
-                            }
-
-                            if let tag = item.projectTag {
-                                Label(tag, systemImage: "briefcase")
-                                    .font(.system(size: 9, weight: .medium))
+                                    .fixedSize()
                                     .foregroundStyle(NotchTheme.sageMuted)
-                                    .lineLimit(1)
-                            }
+                                }
 
-                            if let rec = item.recurrence.label {
-                                Label(rec, systemImage: "repeat")
-                                    .font(.system(size: 9, weight: .medium))
+                                if let tag = item.projectTag {
+                                    HStack(spacing: 2.5) {
+                                        Image(systemName: "briefcase")
+                                            .font(.system(size: 8.5))
+                                        Text(tag)
+                                            .font(.system(size: 9, weight: .medium))
+                                    }
+                                    .lineLimit(1)
+                                    .fixedSize()
                                     .foregroundStyle(NotchTheme.sageMuted)
-                                    .lineLimit(1)
-                            }
+                                }
 
-                            if let joinURL = item.detectedMeetingURL {
-                                Button {
-                                    model.joinMeeting(url: joinURL, title: item.title)
-                                } label: {
-                                    Label(MeetingLinkExtractor.serviceLabel(for: joinURL), systemImage: "video.fill")
-                                        .font(.system(size: 9, weight: .bold))
+                                if let rec = item.recurrence.label {
+                                    HStack(spacing: 2.5) {
+                                        Image(systemName: "repeat")
+                                            .font(.system(size: 8.5))
+                                        Text(rec)
+                                            .font(.system(size: 9, weight: .medium))
+                                    }
+                                    .lineLimit(1)
+                                    .fixedSize()
+                                    .foregroundStyle(NotchTheme.sageMuted)
+                                }
+
+                                if let joinURL = item.detectedMeetingURL {
+                                    Button {
+                                        model.joinMeeting(url: joinURL, title: item.title)
+                                    } label: {
+                                        HStack(spacing: 3) {
+                                            Image(systemName: "video.fill")
+                                                .font(.system(size: 8.5))
+                                            Text(MeetingLinkExtractor.serviceLabel(for: joinURL))
+                                                .font(.system(size: 9, weight: .bold))
+                                        }
+                                        .lineLimit(1)
+                                        .fixedSize()
                                         .foregroundStyle(.white)
                                         .padding(.horizontal, 5)
                                         .padding(.vertical, 1)
                                         .background(NotchTheme.sageBadgeFill, in: Capsule())
+                                    }
+                                    .buttonStyle(.plain)
                                 }
-                                .buttonStyle(.plain)
                             }
                         }
                     }

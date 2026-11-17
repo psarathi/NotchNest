@@ -428,7 +428,12 @@ final class NotchPanelController {
             if model.settings.showTimerInNotch && model.timer.state != .idle {
                 return true
             }
-            return model.settings.showMediaInNotch && model.mediaService.currentTrack != nil
+            if model.settings.showMediaInNotch && (model.mediaService.currentTrack?.isPlaying == true) {
+                return true
+            }
+            return model.tasks.contains {
+                !$0.isCompleted && ($0.dueDate?.timeIntervalSinceNow ?? .infinity) <= 2 * 3600
+            }
         case .music:
             return model.mediaService.currentTrack != nil
         case .countdown:

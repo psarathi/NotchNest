@@ -1682,7 +1682,12 @@ public final class NotchNestModel {
         healthService.setEyeBreakReminder(enabled: settings.eyeBreakReminderEnabled)
         mediaService.preferredPlayer = settings.preferredMusicPlayer
         mediaService.onTrackChanged = { [weak self] track in
-            self?.postTransientLiveActivity(
+            guard let self else { return }
+            guard track.isPlaying, self.timer.state == .idle else { return }
+            guard self.settings.collapsedDisplayMode == .automatic || self.settings.collapsedDisplayMode == .music else {
+                return
+            }
+            self.postTransientLiveActivity(
                 TransientLiveActivity(
                     category: .media,
                     title: track.title,
@@ -1806,6 +1811,10 @@ public final class NotchNestModel {
             || old.expandedCountdownStyle != settings.expandedCountdownStyle
             || old.showExpandedVitals != settings.showExpandedVitals {
             if !settings.showLiveActivityNudge || !settings.showTransientLiveActivities {
+                dismissTransientLiveActivity()
+            } else if old.collapsedDisplayMode != settings.collapsedDisplayMode,
+                      settings.collapsedDisplayMode != .automatic && settings.collapsedDisplayMode != .music,
+                      transientLiveActivity?.category == .media {
                 dismissTransientLiveActivity()
             }
             onHitRectNeedsUpdate?()

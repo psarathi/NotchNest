@@ -229,43 +229,47 @@ struct TaskInlineEditorRow: View {
                 }
             }
 
-            HStack(spacing: 4) {
-                Text("Timer:")
-                    .font(.system(size: 9.5, weight: .medium))
-                    .foregroundStyle(isDarkSurface ? .white.opacity(0.55) : NotchTheme.sageMuted)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    Text("Timer:")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundStyle(isDarkSurface ? .white.opacity(0.55) : NotchTheme.sageMuted)
+                        .lineLimit(1)
+                        .fixedSize()
 
-                ForEach(Self.durationOptions.indices, id: \.self) { idx in
-                    let option = Self.durationOptions[idx]
-                    let selected = targetMinutes == option
-                    Button {
-                        targetMinutes = option
-                    } label: {
-                        Text(option.map { "\($0)m" } ?? "Auto")
-                            .font(.system(size: 9.5, weight: .semibold))
-                            .foregroundStyle(
-                                selected
-                                    ? .white
-                                    : (isDarkSurface ? .white.opacity(0.68) : NotchTheme.sageInk.opacity(0.75))
-                            )
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(
-                                Capsule()
-                                    .fill(
-                                        selected
-                                            ? NotchTheme.sageBadgeFill
-                                            : (isDarkSurface ? Color.white.opacity(0.08) : Color.black.opacity(0.08))
-                                    )
-                            )
+                    ForEach(Self.durationOptions.indices, id: \.self) { idx in
+                        let option = Self.durationOptions[idx]
+                        let selected = targetMinutes == option
+                        Button {
+                            targetMinutes = option
+                        } label: {
+                            Text(option.map { "\($0)m" } ?? "Auto")
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .lineLimit(1)
+                                .fixedSize()
+                                .foregroundStyle(
+                                    selected
+                                        ? .white
+                                        : (isDarkSurface ? .white.opacity(0.68) : NotchTheme.sageInk.opacity(0.75))
+                                )
+                                .padding(.horizontal, 6.5)
+                                .padding(.vertical, 2.5)
+                                .background(
+                                    Capsule()
+                                        .fill(
+                                            selected
+                                                ? NotchTheme.sageBadgeFill
+                                                : (isDarkSurface ? Color.white.opacity(0.08) : Color.black.opacity(0.08))
+                                        )
+                                )
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
-
-                Spacer()
             }
 
-            HStack(spacing: 5) {
-                if let currentDue = dueDate {
+            if let currentDue = dueDate {
+                HStack(spacing: 5) {
                     DatePicker(
                         "",
                         selection: Binding(
@@ -277,8 +281,26 @@ struct TaskInlineEditorRow: View {
                     .labelsHidden()
                     .datePickerStyle(.compact)
                     .controlSize(.mini)
+                    .fixedSize()
                     .colorScheme(isDarkSurface ? .dark : .light)
 
+                    Spacer(minLength: 2)
+
+                    Button {
+                        dueDate = nil
+                        reminderLeadMinutes = nil
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 11))
+                            .foregroundStyle(isDarkSurface ? .white.opacity(0.55) : NotchTheme.sageMuted)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear due date")
+                }
+            }
+
+            HStack(spacing: 6) {
+                if dueDate != nil {
                     Menu {
                         ForEach(Self.reminderOptions.indices, id: \.self) { idx in
                             let opt = Self.reminderOptions[idx]
@@ -294,39 +316,34 @@ struct TaskInlineEditorRow: View {
                             }
                         }
                     } label: {
-                        let remLabel = reminderLeadMinutes.map { $0 == 0 ? "At due" : "\($0)m" } ?? "Off"
-                        Label(remLabel, systemImage: "bell.badge")
-                            .font(.system(size: 9.5, weight: .semibold))
-                            .foregroundStyle(
-                                reminderLeadMinutes != nil
-                                    ? .white
-                                    : (isDarkSurface ? .white.opacity(0.7) : NotchTheme.sageInk)
-                            )
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2.5)
-                            .background(
-                                Capsule()
-                                    .fill(
-                                        reminderLeadMinutes != nil
-                                            ? NotchTheme.sageBadgeFill
-                                            : (isDarkSurface ? Color.white.opacity(0.08) : Color.black.opacity(0.08))
-                                    )
-                            )
+                        let remLabel = reminderLeadMinutes.map { $0 == 0 ? "At due" : "\($0)m before" } ?? "Remind: Off"
+                        HStack(spacing: 3) {
+                            Image(systemName: "bell.badge")
+                                .font(.system(size: 9))
+                            Text(remLabel)
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .lineLimit(1)
+                        }
+                        .fixedSize()
+                        .foregroundStyle(
+                            reminderLeadMinutes != nil
+                                ? .white
+                                : (isDarkSurface ? .white.opacity(0.75) : NotchTheme.sageInk)
+                        )
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(
+                            Capsule()
+                                .fill(
+                                    reminderLeadMinutes != nil
+                                        ? NotchTheme.sageBadgeFill
+                                        : (isDarkSurface ? Color.white.opacity(0.08) : Color.black.opacity(0.08))
+                                )
+                        )
                     }
                     .menuStyle(.borderlessButton)
                     .menuIndicator(.hidden)
                     .fixedSize()
-
-                    Button {
-                        dueDate = nil
-                        reminderLeadMinutes = nil
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(isDarkSurface ? .white.opacity(0.55) : NotchTheme.sageMuted)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Clear due date")
                 } else {
                     Button {
                         let nextHour = Calendar.current.date(byAdding: .hour, value: 1, to: Date()) ?? Date()
@@ -335,31 +352,41 @@ struct TaskInlineEditorRow: View {
                             reminderLeadMinutes = 15
                         }
                     } label: {
-                        Label("Add Due & Reminder", systemImage: "calendar.badge.clock")
-                            .font(.system(size: 9.5, weight: .semibold))
-                            .foregroundStyle(isDarkSurface ? .white.opacity(0.75) : NotchTheme.sageInk.opacity(0.8))
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3)
-                            .background(
-                                Capsule()
-                                    .fill(isDarkSurface ? Color.white.opacity(0.08) : Color.black.opacity(0.08))
-                            )
+                        HStack(spacing: 3) {
+                            Image(systemName: "calendar.badge.clock")
+                                .font(.system(size: 9))
+                            Text("Due & Remind")
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .lineLimit(1)
+                        }
+                        .fixedSize()
+                        .foregroundStyle(isDarkSurface ? .white.opacity(0.78) : NotchTheme.sageInk.opacity(0.82))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(
+                            Capsule()
+                                .fill(isDarkSurface ? Color.white.opacity(0.08) : Color.black.opacity(0.08))
+                        )
                     }
                     .buttonStyle(.plain)
                 }
 
-                Spacer()
+                Spacer(minLength: 4)
 
                 Button("Cancel", action: onCancel)
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(isDarkSurface ? .white.opacity(0.65) : NotchTheme.sageMuted)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .foregroundStyle(isDarkSurface ? .white.opacity(0.68) : NotchTheme.sageMuted)
                     .buttonStyle(.plain)
 
                 Button("Save", action: onSave)
                     .font(.system(size: 10, weight: .semibold))
+                    .lineLimit(1)
+                    .fixedSize()
                     .foregroundStyle(.black)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 3.5)
                     .background(NotchTheme.peachAction, in: Capsule())
                     .buttonStyle(.plain)
             }
