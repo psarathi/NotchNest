@@ -971,7 +971,7 @@ struct TodayTabView: View {
                             model.selectedNoteID = entry.id
                         } label: {
                             HStack {
-                                Text(entry.title.isEmpty ? "Untitled" : entry.title)
+                                Text(dropdownLabel(for: entry))
                                 if entry.id == note?.id {
                                     Image(systemName: "checkmark")
                                 }
@@ -1038,8 +1038,11 @@ struct TodayTabView: View {
                 .help("Note actions")
             }
 
+            let displayedDate = note?.dailyDayKey.flatMap { DailyFocusStats.date(fromDayKey: $0) }
+                ?? note?.updatedAt
+                ?? Date()
             HStack(spacing: 6) {
-                Text(Self.fullDateFormatter.string(from: note?.updatedAt ?? Date()))
+                Text(Self.fullDateFormatter.string(from: displayedDate))
                     .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(NotchTheme.yellowMuted)
 
@@ -1159,11 +1162,22 @@ struct TodayTabView: View {
     }
 
     private func displayNoteTitle(_ note: NoteEntry?) -> String {
-        guard let title = note?.title, !title.isEmpty else { return "Notepad" }
-        if title == "Daily Notepad" || title == "Scratchpad" {
+        guard let note else { return "Notepad" }
+        let title = note.title
+        if note.dailyDayKey == DailyFocusStats.todayKey() || title.isEmpty || title == "Daily Notepad" || title == "Scratchpad" || title.hasPrefix("Daily ") {
             return "Notepad"
         }
         return title
+    }
+
+    private func dropdownLabel(for entry: NoteEntry) -> String {
+        let baseTitle = entry.title.isEmpty ? "Untitled" : entry.title
+        if let dayKey = entry.dailyDayKey,
+           let date = DailyFocusStats.date(fromDayKey: dayKey) {
+            let dateStr = Self.dateHeaderFormatter.string(from: date)
+            return baseTitle.contains(dateStr) ? baseTitle : "\(dateStr) · \(baseTitle)"
+        }
+        return baseTitle
     }
 
     // MARK: - Column 4: Misty Steel-Blue 7-Day Calendar

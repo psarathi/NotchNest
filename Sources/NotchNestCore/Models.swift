@@ -294,17 +294,37 @@ public struct NoteEntry: Identifiable, Codable, Equatable, Sendable {
     public var title: String
     public var body: String
     public var updatedAt: Date
+    public var dailyDayKey: String?
 
     public init(
         id: UUID = UUID(),
         title: String = "Daily Notepad",
         body: String = "",
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(),
+        dailyDayKey: String? = nil
     ) {
         self.id = id
         self.title = title
         self.body = body
         self.updatedAt = updatedAt
+        self.dailyDayKey = dailyDayKey
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case body
+        case updatedAt
+        case dailyDayKey
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        body = try container.decode(String.self, forKey: .body)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        dailyDayKey = try container.decodeIfPresent(String.self, forKey: .dailyDayKey)
     }
 }
 

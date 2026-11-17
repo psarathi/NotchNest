@@ -67,6 +67,7 @@ public final class NotchNestModel {
     private var watchedScreenshots: [ClipItem] = []
     private var pinnedOrDroppedClips: [ClipItem]
     private var lastObservedTimerState: TimerRunState = .idle
+    private var lastEnsuredDailyNoteKey: String = ""
     private var nudgeRefreshTimer: Timer?
     private var lastWeatherRefreshAt: Date?
     private var transientDismissTask: Task<Void, Never>?
@@ -104,6 +105,7 @@ public final class NotchNestModel {
         self.snapService = WindowSnapService()
         self.devHubService = DeveloperHubService()
 
+        self.ensureTodayDailyNote()
         self.clips = mergeClips()
 
         self.timer.onPhaseComplete = { [weak self] phase, minutes in
@@ -959,6 +961,79 @@ public final class NotchNestModel {
 
     // MARK: - Notes
 
+    private static let dailyNoteTitleFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "d MMM"
+        return f
+    }()
+
+    public static func dailyNoteTitle(for date: Date = Date()) -> String {
+        "Daily \(dailyNoteTitleFormatter.string(from: date))"
+    }
+
+    @discardableResult
+    public func ensureTodayDailyNote(now: Date = Date(), calendar: Calendar = .current) -> NoteEntry {
+        let todayKey = DailyFocusStats.todayKey(for: now)
+        var changed = false
+
+        // Remove untouched empty daily/scratchpad shells from previous days
+        let beforeCount = notes.count
+        notes.removeAll { note in
+            let isEmpty = note.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            guard isEmpty else { return false }
+            if let key = note.dailyDayKey {
+                return key != todayKey
+            }
+            let isDefaultShell = note.title == "Scratchpad" || note.title == "Daily Notepad" || note.title.hasPrefix("Daily ")
+            return isDefaultShell && !calendar.isDate(note.updatedAt, inSameDayAs: now)
+        }
+        if notes.count != beforeCount {
+            changed = true
+        }
+
+        let ensured: NoteEntry
+        if let existingToday = notes.first(where: { $0.dailyDayKey == todayKey }) {
+            ensured = existingToday
+            if lastEnsuredDailyNoteKey != todayKey {
+                selectedNoteID = existingToday.id
+            }
+        } else if let sameDayIdx = notes.firstIndex(where: {
+            $0.dailyDayKey == nil &&
+            !$0.title.hasPrefix("[") &&
+            calendar.isDate($0.updatedAt, inSameDayAs: now)
+        }) {
+            notes[sameDayIdx].dailyDayKey = todayKey
+            if notes[sameDayIdx].title == "Scratchpad" || notes[sameDayIdx].title == "Daily Notepad" {
+                notes[sameDayIdx].title = Self.dailyNoteTitle(for: now)
+            }
+            changed = true
+            ensured = notes[sameDayIdx]
+            if lastEnsuredDailyNoteKey != todayKey {
+                selectedNoteID = ensured.id
+            }
+        } else {
+            let freshDaily = NoteEntry(
+                title: Self.dailyNoteTitle(for: now),
+                body: "",
+                updatedAt: now,
+                dailyDayKey: todayKey
+            )
+            notes.insert(freshDaily, at: 0)
+            selectedNoteID = freshDaily.id
+            changed = true
+            ensured = freshDaily
+        }
+
+        lastEnsuredDailyNoteKey = todayKey
+        if !notes.contains(where: { $0.id == selectedNoteID }) {
+            selectedNoteID = ensured.id
+        }
+        if changed {
+            persistence.saveNotes(notes)
+        }
+        return ensured
+    }
+
     public func addNote() {
         let note = NoteEntry(title: "Note \(notes.count + 1)", body: "")
         notes.insert(note, at: 0)
@@ -1495,6 +1570,7 @@ public final class NotchNestModel {
         nudgeRefreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                self.ensureTodayDailyNote()
                 if self.timer.state != self.lastObservedTimerState {
                     self.lastObservedTimerState = self.timer.state
                     self.syncAmbientAudio()

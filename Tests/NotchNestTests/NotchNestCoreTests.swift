@@ -871,4 +871,38 @@ struct NotchNestCoreTests {
         #expect(model.tasks.first(where: { $0.id == slides.id })?.isCompleted == true)
         #expect(model.activeFocusTaskID == nil)
     }
+
+    @Test("Daily Notepad creates a fresh note per day while preserving previous days")
+    @MainActor
+    func dailyNotepadRollover() {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NotchNestDailyNoteTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let store = PersistenceStore(baseDirectory: tempDir)
+        let cal = Calendar.current
+        let today = Date()
+        let yesterday = cal.date(byAdding: .day, value: -1, to: today)!
+        let todayKey = DailyFocusStats.todayKey(for: today)
+        let yesterdayKey = DailyFocusStats.todayKey(for: yesterday)
+
+        // Seed yesterday's note with content + an empty stale shell
+        store.saveNotes([
+            NoteEntry(title: "Lead landing page", body: "Lead landing page\nAsk Sam", updatedAt: yesterday, dailyDayKey: yesterdayKey),
+            NoteEntry(title: "Scratchpad", body: "   ", updatedAt: yesterday)
+        ])
+
+        let model = NotchNestModel(persistence: store, enableSystemIntegrations: false)
+        defer { model.shutdown() }
+
+        let todaysNote = model.ensureTodayDailyNote(now: today, calendar: cal)
+        #expect(todaysNote.dailyDayKey == todayKey)
+        #expect(model.selectedNoteID == todaysNote.id)
+        #expect(todaysNote.body.isEmpty)
+
+        // Yesterday's non-empty note is preserved; yesterday's empty shell was cleaned up
+        #expect(model.notes.count == 2)
+        #expect(model.notes.contains(where: { $0.dailyDayKey == yesterdayKey && $0.body.contains("Lead landing page") }))
+        #expect(!model.notes.contains(where: { $0.title == "Scratchpad" }))
+    }
 }
