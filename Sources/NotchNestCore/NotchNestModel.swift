@@ -1,0 +1,1471 @@
+import AppKit
+import Foundation
+import Observation
+import ServiceManagement
+@preconcurrency import UserNotifications
+
+public enum UtilityOverlay: String, Sendable, Equatable {
+    case wrapUp
+    case diagnostics
+}
+
+@MainActor
+@Observable
+public final class NotchNestModel {
+    public var isExpanded = false
+    public var isPinned = false
+    public var activeTab: NotchTab = .today
+    public var isHoveringNotch = false
+    public var lastTaskCompletedPulse = false
+
+    public var tasks: [TaskItem]
+    public var notes: [NoteEntry]
+    public var selectedNoteID: UUID
+    public var clips: [ClipItem] = []
+    public var settings: AppSettings {
+        didSet {
+            persistence.saveSettings(settings)
+            applySettingsSideEffects(from: oldValue)
+        }
+    }
+    public var focusStats: DailyFocusStats
+    public var activityHistory: [DailyActivityRecord]
+
+    /// Task currently linked to a Focus session or pinned as a Live Activity nudge.
+    public var activeFocusTaskID: UUID?
+    public var pinnedLiveActivityTaskID: UUID?
+    public var dismissedEventIDs: Set<String> = []
+    public var isAmbientPreviewActive = false
+    public var activeUtilityOverlay: UtilityOverlay?
+    public var selectedHubSection: HubSection = .overview
+    public var isDraggingFileOverNotch = false
+    public var pendingActionURLs: [URL] = []
+    public var dropActionFeedback: String?
+    public var transientLiveActivity: TransientLiveActivity?
+    public var workspaceFocusRequestNonce: Int = 0
+    public var pendingWorkspaceTypedSeed: String = ""
+
+    public let persistence: PersistenceStore
+    public let timer: FocusTimerEngine
+    public let eventKit: EventKitService
+    public let cameraMirror: CameraMirrorController
+    public let audioEngine: FocusAudioEngine
+    public let voiceCapture: VoiceCaptureController
+    public let travelTimeService: TravelTimeService
+    public let systemService: SystemAndPowerService
+    public let mediaService: MediaPlaybackService
+    public let weatherService: WeatherService
+    public let screenTimeService: ScreenTimeService
+    public let healthService: HealthWellbeingService
+    public let snapService: WindowSnapService
+    public let devHubService: DeveloperHubService
+
+    private var clipsWatcher: ClipsWatcher?
+    private var hotKeyManager: GlobalHotKeyManager?
+    private var watchedScreenshots: [ClipItem] = []
+    private var pinnedOrDroppedClips: [ClipItem]
+    private var lastObservedTimerState: TimerRunState = .idle
+    private var nudgeRefreshTimer: Timer?
+    private var lastWeatherRefreshAt: Date?
+    private var transientDismissTask: Task<Void, Never>?
+    @ObservationIgnored private nonisolated(unsafe) var screenUnlockObserver: NSObjectProtocol?
+
+    public var onRequestPanelToggle: (() -> Void)?
+    public var onRequestPanelExpand: ((NotchTab?) -> Void)?
+    public var onLayoutSettingsChanged: (() -> Void)?
+    public var onHitRectNeedsUpdate: (() -> Void)?
+    public var onPrivacyModeChanged: ((Bool) -> Void)?
+
+    public init(persistence: PersistenceStore = PersistenceStore(), enableSystemIntegrations: Bool = true) {
+        self.persistence = persistence
+        let loadedSettings = persistence.loadSettings()
+        self.settings = loadedSettings
+        self.tasks = persistence.loadTasks()
+        let loadedNotes = persistence.loadNotes()
+        self.notes = loadedNotes
+        self.selectedNoteID = loadedNotes.first?.id ?? UUID()
+        self.pinnedOrDroppedClips = persistence.loadPinnedClips()
+        self.focusStats = persistence.loadStats()
+        self.activityHistory = persistence.loadActivityHistory()
+        self.timer = FocusTimerEngine(focusMinutes: loadedSettings.focusMinutes)
+        self.eventKit = EventKitService()
+        self.cameraMirror = CameraMirrorController()
+        self.audioEngine = FocusAudioEngine()
+        self.voiceCapture = VoiceCaptureController()
+        self.travelTimeService = TravelTimeService()
+        self.systemService = SystemAndPowerService()
+        self.mediaService = MediaPlaybackService()
+        self.weatherService = WeatherService()
+        self.screenTimeService = ScreenTimeService(persistence: persistence)
+        self.healthService = HealthWellbeingService(persistence: persistence)
+        self.snapService = WindowSnapService()
+        self.devHubService = DeveloperHubService()
+
+        self.clips = mergeClips()
+
+        self.timer.onPhaseComplete = { [weak self] phase, minutes in
+            self?.handleTimerCompleted(phase: phase, minutes: minutes)
+        }
+
+        if enableSystemIntegrations {
+            Task { @MainActor [weak self] in
+                self?.setupIntegrations()
+            }
+        }
+    }
+
+    // MARK: - Task Computed Views
+
+    public var openTaskCount: Int {
+        tasks.filter { !$0.isCompleted }.count
+    }
+
+    public var todayTasks: [TaskItem] {
+        tasks(forDayOffset: 0)
+    }
+
+    public var todayOpenCount: Int {
+        todayTasks.filter { !$0.isCompleted }.count
+    }
+
+    public var todayCompletedCount: Int {
+        todayTasks.filter { $0.isCompleted }.count
+    }
+
+    public func tasks(in bucket: TaskBucket) -> [TaskItem] {
+        tasks.filter { $0.scheduledBucket == bucket }
+    }
+
+    public func bucket(forDayOffset offset: Int) -> TaskBucket {
+        switch offset {
+        case ..<0: return .inbox
+        case 0: return .today
+        case 1: return .tomorrow
+        default: return .upcoming
+        }
+    }
+
+    public func dayKey(forDayOffset offset: Int, calendar: Calendar = .current) -> String? {
+        guard offset >= 0,
+              let date = calendar.date(byAdding: .day, value: offset, to: calendar.startOfDay(for: Date()))
+        else {
+            return nil
+        }
+        return DailyFocusStats.todayKey(for: date)
+    }
+
+    public func weekPlanColumns(days: Int = 7, referenceDate: Date = Date(), calendar: Calendar = .current) -> [WeekPlanColumn] {
+        var cols: [WeekPlanColumn] = [.inbox]
+        let startToday = calendar.startOfDay(for: referenceDate)
+        for offset in 0..<days {
+            if let date = calendar.date(byAdding: .day, value: offset, to: startToday) {
+                cols.append(.day(dayKey: DailyFocusStats.todayKey(for: date), date: date, offset: offset))
+            }
+        }
+        cols.append(.later)
+        return cols
+    }
+
+    public func tasks(
+        forColumn column: WeekPlanColumn,
+        referenceDate: Date = Date(),
+        calendar: Calendar = .current
+    ) -> [TaskItem] {
+        let startToday = calendar.startOfDay(for: referenceDate)
+        let sevenDayKeys: Set<String> = Set((0..<7).compactMap { offset in
+            calendar.date(byAdding: .day, value: offset, to: startToday).map { DailyFocusStats.todayKey(for: $0) }
+        })
+
+        switch column {
+        case .inbox:
+            return tasks.filter { $0.scheduledBucket == .inbox && $0.scheduledDayKey == nil && $0.dueDate == nil }
+
+        case .day(let targetKey, let targetDate, let offset):
+            return tasks.filter { item in
+                if let explicitKey = item.scheduledDayKey {
+                    return explicitKey == targetKey
+                }
+                if let due = item.dueDate {
+                    return calendar.isDate(due, inSameDayAs: targetDate)
+                }
+                if offset == 0 && item.scheduledBucket == .today {
+                    return true
+                }
+                if offset == 1 && item.scheduledBucket == .tomorrow {
+                    return true
+                }
+                return false
+            }
+
+        case .later:
+            return tasks.filter { item in
+                if item.scheduledBucket == .inbox && item.scheduledDayKey == nil && item.dueDate == nil {
+                    return false
+                }
+                if let key = item.scheduledDayKey ?? item.dueDate.map({ DailyFocusStats.todayKey(for: $0) }) {
+                    if sevenDayKeys.contains(key) {
+                        return false
+                    }
+                    if let d = DailyFocusStats.date(fromDayKey: key), d < startToday {
+                        // Past tasks without completion fall under Today/backlog or Inbox rather than future Later unless upcoming
+                        return item.scheduledBucket == .upcoming
+                    }
+                    return true
+                }
+                return item.scheduledBucket == .upcoming
+            }
+        }
+    }
+
+    public func tasks(forDayOffset offset: Int, calendar: Calendar = .current) -> [TaskItem] {
+        if offset < 0 {
+            return tasks(forColumn: .inbox, calendar: calendar)
+        }
+        guard let date = calendar.date(byAdding: .day, value: offset, to: calendar.startOfDay(for: Date())) else {
+            return tasks(forColumn: .later, calendar: calendar)
+        }
+        let key = DailyFocusStats.todayKey(for: date)
+        if offset < 7 {
+            return tasks(forColumn: .day(dayKey: key, date: date, offset: offset), calendar: calendar)
+        }
+        return tasks.filter { item in
+            if let explicitKey = item.scheduledDayKey {
+                return explicitKey == key
+            }
+            if let due = item.dueDate {
+                return calendar.isDate(due, inSameDayAs: date)
+            }
+            return false
+        }
+    }
+
+    public func events(on day: Date, calendar: Calendar = .current) -> [CalendarEventItem] {
+        let startDay = calendar.startOfDay(for: day)
+        guard let endDay = calendar.date(byAdding: .day, value: 1, to: startDay) else { return [] }
+        return eventKit.upcomingEvents.filter { event in
+            event.endDate > startDay && event.startDate < endDay
+        }
+    }
+
+    public func timedTasks(on day: Date, calendar: Calendar = .current) -> [TaskItem] {
+        let targetKey = DailyFocusStats.todayKey(for: day)
+        return tasks.filter { item in
+            guard let due = item.dueDate else { return false }
+            if let key = item.scheduledDayKey {
+                return key == targetKey
+            }
+            return calendar.isDate(due, inSameDayAs: day)
+        }
+        .sorted { ($0.dueDate ?? .distantFuture) < ($1.dueDate ?? .distantFuture) }
+    }
+
+    public func dayHasActivity(_ day: Date, calendar: Calendar = .current) -> Bool {
+        if !events(on: day, calendar: calendar).isEmpty {
+            return true
+        }
+        return !timedTasks(on: day, calendar: calendar).isEmpty
+    }
+
+    @discardableResult
+    public func moveIncompleteTodayToTomorrow() -> Int {
+        var moved = 0
+        let tmrKey = dayKey(forDayOffset: 1)
+        for idx in tasks.indices where !tasks[idx].isCompleted && isTaskInToday(tasks[idx]) {
+            tasks[idx].scheduledBucket = .tomorrow
+            tasks[idx].scheduledDayKey = tmrKey
+            moved += 1
+        }
+        if moved > 0 {
+            sortAndSaveTasks()
+            onHitRectNeedsUpdate?()
+        }
+        return moved
+    }
+
+    private func isTaskInToday(_ item: TaskItem, calendar: Calendar = .current) -> Bool {
+        let todayKey = DailyFocusStats.todayKey()
+        if let key = item.scheduledDayKey {
+            return key == todayKey
+        }
+        if let due = item.dueDate {
+            return calendar.isDateInToday(due)
+        }
+        return item.scheduledBucket == .today
+    }
+
+    public var activeFocusTask: TaskItem? {
+        guard let activeFocusTaskID else { return nil }
+        return tasks.first(where: { $0.id == activeFocusTaskID })
+    }
+
+    public var selectedNoteIndex: Int? {
+        notes.firstIndex(where: { $0.id == selectedNoteID })
+    }
+
+    public var launchAtLoginEnabled: Bool {
+        guard Bundle.main.bundleURL.pathExtension == "app" else { return false }
+        return SMAppService.mainApp.status == .enabled
+    }
+
+    // MARK: - Live Activity Nudge State
+
+    public var activeLiveNudgeTask: TaskItem? {
+        let now = Date()
+        if let pinnedID = pinnedLiveActivityTaskID,
+           let pinned = tasks.first(where: { $0.id == pinnedID && !$0.isCompleted }) {
+            if let snoozed = pinned.snoozedUntil, snoozed > now {
+                return nil
+            }
+            return pinned
+        }
+
+        return tasks.first { task in
+            guard !task.isCompleted, let due = task.dueDate else { return false }
+            if let snoozed = task.snoozedUntil, snoozed > now {
+                return false
+            }
+            // Surface tasks due within the next 15 minutes or overdue by up to 4 hours today
+            let delta = due.timeIntervalSince(now)
+            return delta <= 15 * 60 && delta >= -4 * 3600
+        }
+    }
+
+    public var activeLiveNudgeEvent: CalendarEventItem? {
+        let now = Date()
+        return eventKit.upcomingEvents.first { event in
+            guard !event.isAllDay, !dismissedEventIDs.contains(event.id) else { return false }
+            let leadMinutes = Double(max(10, (event.travelTimeMinutes ?? 0) + 10)) * 60
+            let delta = event.startDate.timeIntervalSince(now)
+            return delta <= leadMinutes && event.endDate > now
+        }
+    }
+
+    public var showsLiveActivityPill: Bool {
+        healthService.isEyeBreakDue
+            || transientLiveActivity != nil
+            || (settings.showLiveActivityNudge && (activeLiveNudgeTask != nil || activeLiveNudgeEvent != nil))
+    }
+
+    // MARK: - Insights Computed Metrics
+
+    public var recent7DayRecords: [DailyActivityRecord] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let lookup = Dictionary(uniqueKeysWithValues: activityHistory.map { ($0.dayKey, $0) })
+        return (0..<7).reversed().compactMap { offset -> DailyActivityRecord? in
+            guard let day = calendar.date(byAdding: .day, value: -offset, to: today) else { return nil }
+            let key = DailyFocusStats.todayKey(for: day)
+            return lookup[key] ?? DailyActivityRecord(dayKey: key)
+        }
+    }
+
+    public var totalCompletedTasksMetric: Int {
+        let historySum = activityHistory.reduce(0) { $0 + $1.completedTasks }
+        let currentCompleted = tasks.filter { $0.isCompleted }.count
+        return max(historySum, currentCompleted)
+    }
+
+    public var totalFocusedMinutesMetric: Int {
+        max(focusStats.focusedMinutes, activityHistory.reduce(0) { $0 + $1.focusedMinutes })
+    }
+
+    public var currentStreakDays: Int {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let lookup = Dictionary(uniqueKeysWithValues: activityHistory.map { ($0.dayKey, $0) })
+
+        var streak = 0
+        for offset in 0..<30 {
+            guard let day = calendar.date(byAdding: .day, value: -offset, to: today) else { break }
+            let key = DailyFocusStats.todayKey(for: day)
+            let record = lookup[key]
+            let active = (record?.completedTasks ?? 0) > 0 || (record?.focusedMinutes ?? 0) > 0
+            if active {
+                streak += 1
+            } else if offset > 0 {
+                break
+            }
+        }
+        return streak
+    }
+
+    public var bestFocusHourRangeLabel: String {
+        var hourlyTotals: [Int: Int] = [:]
+        for record in activityHistory {
+            for (hour, mins) in record.hourlyFocusMinutes {
+                hourlyTotals[hour, default: 0] += mins
+            }
+        }
+        guard let best = hourlyTotals.max(by: { $0.value < $1.value }), best.value > 0 else {
+            return "—"
+        }
+        return "\(formatHour(best.key)) – \(formatHour((best.key + 1) % 24))"
+    }
+
+    private func formatHour(_ hour: Int) -> String {
+        let h12 = hour % 12 == 0 ? 12 : hour % 12
+        let period = hour < 12 ? "AM" : "PM"
+        return "\(h12) \(period)"
+    }
+
+    // MARK: - Login Item
+
+    public func setLaunchAtLogin(_ enabled: Bool) {
+        guard Bundle.main.bundleURL.pathExtension == "app" else { return }
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            // Ignored when unbundled
+        }
+    }
+
+    // MARK: - Tasks
+
+    public func addTask(
+        title: String,
+        priority: TaskPriority = .normal,
+        bucket: TaskBucket = .today,
+        scheduledDayKey: String? = nil,
+        dueDate: Date? = nil,
+        projectTag: String? = nil,
+        recurrence: TaskRecurrence = .none
+    ) {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let resolvedDayKey: String?
+        if let scheduledDayKey {
+            resolvedDayKey = scheduledDayKey
+        } else if let dueDate {
+            resolvedDayKey = DailyFocusStats.todayKey(for: dueDate)
+        } else if bucket == .today {
+            resolvedDayKey = dayKey(forDayOffset: 0)
+        } else if bucket == .tomorrow {
+            resolvedDayKey = dayKey(forDayOffset: 1)
+        } else {
+            resolvedDayKey = nil
+        }
+
+        var item = TaskItem(
+            title: trimmed,
+            priority: priority,
+            scheduledBucket: bucket,
+            scheduledDayKey: resolvedDayKey,
+            dueDate: dueDate,
+            projectTag: projectTag,
+            recurrence: recurrence
+        )
+        if settings.syncReminders && eventKit.reminderAuth == .authorized {
+            item.reminderIdentifier = eventKit.upsertReminder(for: item)
+        }
+        tasks.insert(item, at: 0)
+        sortAndSaveTasks()
+        onHitRectNeedsUpdate?()
+    }
+
+    public func addParsedTask(
+        _ rawInput: String,
+        defaultBucket: TaskBucket = .today,
+        defaultDayKey: String? = nil,
+        priorityOverride: TaskPriority = .normal
+    ) {
+        let fallbackKey = defaultDayKey ?? (defaultBucket == .today ? dayKey(forDayOffset: 0) : (defaultBucket == .tomorrow ? dayKey(forDayOffset: 1) : nil))
+        let parsed = NaturalLanguageTaskParser.parse(
+            rawInput,
+            defaultBucket: defaultBucket,
+            defaultDayKey: fallbackKey
+        )
+        guard !parsed.title.isEmpty else { return }
+        let finalPriority: TaskPriority = (priorityOverride == .high || parsed.priority == .high) ? .high : .normal
+        addTask(
+            title: parsed.title,
+            priority: finalPriority,
+            bucket: parsed.scheduledBucket,
+            scheduledDayKey: parsed.scheduledDayKey,
+            dueDate: parsed.dueDate,
+            projectTag: parsed.projectTag,
+            recurrence: parsed.recurrence
+        )
+    }
+
+    public func toggleTask(_ id: UUID) {
+        guard let idx = tasks.firstIndex(where: { $0.id == id }) else { return }
+        tasks[idx].isCompleted.toggle()
+        tasks[idx].completedAt = tasks[idx].isCompleted ? Date() : nil
+
+        if tasks[idx].isCompleted {
+            triggerMascotPulse()
+            recordTaskCompletion(delta: 1)
+            if pinnedLiveActivityTaskID == id {
+                pinnedLiveActivityTaskID = nil
+            }
+            if activeFocusTaskID == id {
+                activeFocusTaskID = nil
+            }
+        } else {
+            recordTaskCompletion(delta: -1)
+        }
+
+        if settings.syncReminders && eventKit.reminderAuth == .authorized {
+            tasks[idx].reminderIdentifier = eventKit.upsertReminder(for: tasks[idx])
+        }
+        sortAndSaveTasks()
+        onHitRectNeedsUpdate?()
+    }
+
+    public func toggleTaskPriority(_ id: UUID) {
+        guard let idx = tasks.firstIndex(where: { $0.id == id }) else { return }
+        tasks[idx].priority = tasks[idx].priority == .high ? .normal : .high
+        sortAndSaveTasks()
+    }
+
+    public func updateTask(
+        _ id: UUID,
+        title: String,
+        priority: TaskPriority? = nil,
+        bucket: TaskBucket? = nil,
+        dayKey: String? = nil
+    ) {
+        guard let idx = tasks.firstIndex(where: { $0.id == id }) else { return }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        tasks[idx].title = trimmed
+        if let priority {
+            tasks[idx].priority = priority
+        }
+        if let dayKey {
+            tasks[idx].scheduledDayKey = dayKey
+            if let bucket {
+                tasks[idx].scheduledBucket = bucket
+            } else if let targetDate = DailyFocusStats.date(fromDayKey: dayKey) {
+                if Calendar.current.isDateInToday(targetDate) {
+                    tasks[idx].scheduledBucket = .today
+                } else if Calendar.current.isDateInTomorrow(targetDate) {
+                    tasks[idx].scheduledBucket = .tomorrow
+                } else {
+                    tasks[idx].scheduledBucket = .upcoming
+                }
+            }
+            if let existingDue = tasks[idx].dueDate,
+               let targetDate = DailyFocusStats.date(fromDayKey: dayKey) {
+                tasks[idx].dueDate = Self.combining(day: targetDate, timeFrom: existingDue)
+            }
+        } else if let bucket {
+            applyBucketTransition(at: idx, to: bucket)
+        }
+        if settings.syncReminders && eventKit.reminderAuth == .authorized {
+            tasks[idx].reminderIdentifier = eventKit.upsertReminder(for: tasks[idx])
+        }
+        sortAndSaveTasks()
+        onHitRectNeedsUpdate?()
+    }
+
+    public func moveTask(_ id: UUID, to bucket: TaskBucket) {
+        guard let idx = tasks.firstIndex(where: { $0.id == id }) else { return }
+        applyBucketTransition(at: idx, to: bucket)
+        sortAndSaveTasks()
+        onHitRectNeedsUpdate?()
+    }
+
+    public func moveTask(_ id: UUID, toColumn column: WeekPlanColumn, calendar: Calendar = .current) {
+        guard let idx = tasks.firstIndex(where: { $0.id == id }) else { return }
+        switch column {
+        case .inbox:
+            tasks[idx].scheduledBucket = .inbox
+            tasks[idx].scheduledDayKey = nil
+            tasks[idx].dueDate = nil
+        case .day(let key, let date, _):
+            tasks[idx].scheduledBucket = column.bucket
+            tasks[idx].scheduledDayKey = key
+            if let existingDue = tasks[idx].dueDate {
+                tasks[idx].dueDate = Self.combining(day: date, timeFrom: existingDue, calendar: calendar)
+            }
+        case .later:
+            tasks[idx].scheduledBucket = .upcoming
+            tasks[idx].scheduledDayKey = nil
+            tasks[idx].dueDate = nil
+        }
+        sortAndSaveTasks()
+        onHitRectNeedsUpdate?()
+    }
+
+    private func applyBucketTransition(at idx: Int, to bucket: TaskBucket) {
+        tasks[idx].scheduledBucket = bucket
+        switch bucket {
+        case .inbox:
+            tasks[idx].scheduledDayKey = nil
+            tasks[idx].dueDate = nil
+        case .today:
+            let key = dayKey(forDayOffset: 0)
+            tasks[idx].scheduledDayKey = key
+            if let existingDue = tasks[idx].dueDate {
+                tasks[idx].dueDate = Self.combining(day: Date(), timeFrom: existingDue)
+            }
+        case .tomorrow:
+            let key = dayKey(forDayOffset: 1)
+            tasks[idx].scheduledDayKey = key
+            if let existingDue = tasks[idx].dueDate,
+               let tmr = Calendar.current.date(byAdding: .day, value: 1, to: Date()) {
+                tasks[idx].dueDate = Self.combining(day: tmr, timeFrom: existingDue)
+            }
+        case .upcoming:
+            tasks[idx].scheduledDayKey = nil
+        }
+    }
+
+    private static func combining(day: Date, timeFrom timeDate: Date, calendar: Calendar = .current) -> Date? {
+        var comps = calendar.dateComponents([.year, .month, .day], from: day)
+        let timeComps = calendar.dateComponents([.hour, .minute, .second], from: timeDate)
+        comps.hour = timeComps.hour
+        comps.minute = timeComps.minute
+        comps.second = timeComps.second
+        return calendar.date(from: comps)
+    }
+
+    public func pinTaskAsLiveNudge(_ id: UUID) {
+        guard tasks.contains(where: { $0.id == id && !$0.isCompleted }) else { return }
+        if let idx = tasks.firstIndex(where: { $0.id == id }) {
+            tasks[idx].snoozedUntil = nil
+        }
+        pinnedLiveActivityTaskID = (pinnedLiveActivityTaskID == id) ? nil : id
+        persistence.saveTasks(tasks)
+        onHitRectNeedsUpdate?()
+    }
+
+    public func snoozeActiveNudge(minutes: Int = 5) {
+        if healthService.isEyeBreakDue {
+            healthService.snoozeEyeBreak(minutes: minutes)
+            onHitRectNeedsUpdate?()
+            return
+        }
+        let snoozeDate = Date().addingTimeInterval(TimeInterval(minutes * 60))
+        if let task = activeLiveNudgeTask,
+           let idx = tasks.firstIndex(where: { $0.id == task.id }) {
+            tasks[idx].snoozedUntil = snoozeDate
+            if pinnedLiveActivityTaskID == task.id {
+                pinnedLiveActivityTaskID = nil
+            }
+            persistence.saveTasks(tasks)
+        } else if let event = activeLiveNudgeEvent {
+            dismissedEventIDs.insert(event.id)
+        }
+        onHitRectNeedsUpdate?()
+    }
+
+    public func completeActiveNudge() {
+        if healthService.isEyeBreakDue {
+            healthService.completeEyeBreak()
+            onHitRectNeedsUpdate?()
+            return
+        }
+        if let task = activeLiveNudgeTask {
+            toggleTask(task.id)
+        } else if let event = activeLiveNudgeEvent {
+            dismissedEventIDs.insert(event.id)
+            onHitRectNeedsUpdate?()
+        }
+    }
+
+    public func deleteTask(_ id: UUID) {
+        guard let idx = tasks.firstIndex(where: { $0.id == id }) else { return }
+        let removed = tasks.remove(at: idx)
+        if pinnedLiveActivityTaskID == id { pinnedLiveActivityTaskID = nil }
+        if activeFocusTaskID == id { activeFocusTaskID = nil }
+        if settings.syncReminders && eventKit.reminderAuth == .authorized {
+            eventKit.deleteReminder(identifier: removed.reminderIdentifier)
+        }
+        persistence.saveTasks(tasks)
+        onHitRectNeedsUpdate?()
+    }
+
+    public func clearCompletedTasks() {
+        let completed = tasks.filter { $0.isCompleted }
+        if settings.syncReminders && eventKit.reminderAuth == .authorized {
+            for item in completed {
+                eventKit.deleteReminder(identifier: item.reminderIdentifier)
+            }
+        }
+        tasks.removeAll { $0.isCompleted }
+        persistence.saveTasks(tasks)
+    }
+
+    @discardableResult
+    public func carryOverIncompleteToToday() -> Int {
+        var moved = 0
+        let calendar = Calendar.current
+        let startToday = calendar.startOfDay(for: Date())
+        let todayKey = dayKey(forDayOffset: 0)
+        for idx in tasks.indices {
+            if !tasks[idx].isCompleted,
+               !isTaskInToday(tasks[idx], calendar: calendar),
+               tasks[idx].createdAt < startToday {
+                tasks[idx].scheduledBucket = .today
+                tasks[idx].scheduledDayKey = todayKey
+                moved += 1
+            }
+        }
+        if moved > 0 {
+            sortAndSaveTasks()
+        }
+        return moved
+    }
+
+    public func syncWithReminders() async {
+        if eventKit.reminderAuth == .notDetermined {
+            _ = await eventKit.requestRemindersAccess()
+        }
+        guard eventKit.reminderAuth == .authorized else { return }
+
+        let remote = await eventKit.fetchRemindersFromNotchNestList()
+        var byReminderID: [String: Int] = [:]
+        for (index, item) in tasks.enumerated() {
+            if let rid = item.reminderIdentifier {
+                byReminderID[rid] = index
+            }
+        }
+
+        for remoteItem in remote {
+            guard let rid = remoteItem.reminderIdentifier else { continue }
+            if let existingIdx = byReminderID[rid] {
+                tasks[existingIdx].title = remoteItem.title
+                tasks[existingIdx].isCompleted = remoteItem.isCompleted
+                tasks[existingIdx].completedAt = remoteItem.completedAt
+            } else {
+                tasks.append(remoteItem)
+            }
+        }
+
+        for index in tasks.indices where tasks[index].reminderIdentifier == nil {
+            tasks[index].reminderIdentifier = eventKit.upsertReminder(for: tasks[index])
+        }
+        sortAndSaveTasks()
+    }
+
+    private func sortAndSaveTasks() {
+        tasks.sort { lhs, rhs in
+            if lhs.isCompleted != rhs.isCompleted {
+                return !lhs.isCompleted
+            }
+            if lhs.priority != rhs.priority {
+                return lhs.priority == .high
+            }
+            if let lDue = lhs.dueDate, let rDue = rhs.dueDate, lDue != rDue {
+                return lDue < rDue
+            }
+            return lhs.createdAt > rhs.createdAt
+        }
+        persistence.saveTasks(tasks)
+    }
+
+    // MARK: - Focus & Ambient Audio
+
+    public func startFocus(on taskID: UUID? = nil) {
+        if let taskID {
+            activeFocusTaskID = taskID
+        }
+        isAmbientPreviewActive = false
+        if timer.state == .running {
+            syncAmbientAudio()
+            return
+        }
+        if timer.state == .paused {
+            timer.resume()
+        } else {
+            timer.start(minutes: settings.focusMinutes, phase: .focus)
+            postTransientLiveActivity(
+                TransientLiveActivity(
+                    category: .pomodoro,
+                    title: "Focus · \(settings.focusMinutes)m",
+                    subtitle: activeFocusTask?.title ?? settings.focusSoundscape.label,
+                    badgeText: "FOCUS",
+                    symbolName: "flame.fill",
+                    accentHex: "#EE9E5B",
+                    targetTab: .timer
+                )
+            )
+        }
+        syncAmbientAudio()
+    }
+
+    public func toggleFocusPlayPause() {
+        isAmbientPreviewActive = false
+        timer.togglePlayPause()
+        syncAmbientAudio()
+    }
+
+    public func resetFocusTimer() {
+        isAmbientPreviewActive = false
+        timer.reset()
+        syncAmbientAudio()
+    }
+
+    public func toggleAmbientPreview() {
+        isAmbientPreviewActive.toggle()
+        syncAmbientAudio()
+    }
+
+    public func selectSoundscape(_ sound: FocusSoundscape) {
+        settings.focusSoundscape = sound
+        if sound == .none {
+            isAmbientPreviewActive = false
+        } else if timer.state != .running {
+            isAmbientPreviewActive = true
+        }
+        syncAmbientAudio()
+    }
+
+    public func syncAmbientAudio() {
+        let shouldPlay = (timer.state == .running || isAmbientPreviewActive)
+        audioEngine.update(
+            soundscape: settings.focusSoundscape,
+            shouldPlay: shouldPlay,
+            volume: settings.focusSoundVolume
+        )
+    }
+
+    // MARK: - Notes
+
+    public func addNote() {
+        let note = NoteEntry(title: "Note \(notes.count + 1)", body: "")
+        notes.insert(note, at: 0)
+        selectedNoteID = note.id
+        persistence.saveNotes(notes)
+    }
+
+    public func updateNoteBody(_ id: UUID, body: String) {
+        guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
+        notes[idx].body = body
+        notes[idx].updatedAt = Date()
+        if notes[idx].title.hasPrefix("Scratchpad") || notes[idx].title.hasPrefix("Daily") || notes[idx].title.hasPrefix("Note ") {
+            let firstLine = body.split(separator: "\n").first.map(String.init)?.trimmingCharacters(in: .whitespaces)
+            if let firstLine, !firstLine.isEmpty {
+                notes[idx].title = String(firstLine.prefix(24))
+            }
+        }
+        persistence.saveNotes(notes)
+    }
+
+    @discardableResult
+    public func convertNoteLinesToTasks(_ id: UUID) -> Int {
+        guard let note = notes.first(where: { $0.id == id }) else { return 0 }
+        let lines = note.body
+            .components(separatedBy: .newlines)
+            .map { line in
+                line.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .replacingOccurrences(of: #"^(?:[-*•]|\[\s*\]|\d+\.)\s+"#, with: "", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            .filter { !$0.isEmpty }
+
+        guard !lines.isEmpty else { return 0 }
+        for line in lines.reversed() {
+            addParsedTask(line, defaultBucket: .today)
+        }
+        return lines.count
+    }
+
+    public func deleteNote(_ id: UUID) {
+        notes.removeAll { $0.id == id }
+        if notes.isEmpty {
+            let fallback = NoteEntry(title: "Daily Notepad", body: "")
+            notes = [fallback]
+        }
+        if !notes.contains(where: { $0.id == selectedNoteID }) {
+            selectedNoteID = notes[0].id
+        }
+        persistence.saveNotes(notes)
+    }
+
+    // MARK: - Clips
+
+    public func addDroppedFiles(_ urls: [URL]) {
+        var changed = false
+        for url in urls where url.isFileURL {
+            if let existingIdx = pinnedOrDroppedClips.firstIndex(where: { $0.path == url.path }) {
+                pinnedOrDroppedClips[existingIdx].addedAt = Date()
+                pinnedOrDroppedClips[existingIdx].isPinned = true
+            } else {
+                let item = ClipItem(
+                    url: url,
+                    addedAt: Date(),
+                    isPinned: true,
+                    isImage: ClipsFilter.isImageFile(url)
+                )
+                pinnedOrDroppedClips.insert(item, at: 0)
+            }
+            changed = true
+        }
+        if changed {
+            persistence.savePinnedClips(pinnedOrDroppedClips)
+            clips = mergeClips()
+        }
+    }
+
+    public func toggleClipPin(_ item: ClipItem) {
+        if let idx = pinnedOrDroppedClips.firstIndex(where: { $0.path == item.path }) {
+            pinnedOrDroppedClips.remove(at: idx)
+        } else {
+            var pinned = item
+            pinned.isPinned = true
+            pinnedOrDroppedClips.insert(pinned, at: 0)
+        }
+        persistence.savePinnedClips(pinnedOrDroppedClips)
+        clips = mergeClips()
+    }
+
+    public func removeClip(_ item: ClipItem) {
+        pinnedOrDroppedClips.removeAll { $0.path == item.path }
+        watchedScreenshots.removeAll { $0.path == item.path }
+        persistence.savePinnedClips(pinnedOrDroppedClips)
+        clips = mergeClips()
+    }
+
+    public func refreshClips() {
+        clipsWatcher?.scanNow()
+        clips = mergeClips()
+    }
+
+    public func handleDroppedFilesForActions(_ urls: [URL]) {
+        let fileURLs = urls.filter(\.isFileURL)
+        guard !fileURLs.isEmpty else { return }
+        addDroppedFiles(fileURLs)
+        pendingActionURLs = fileURLs
+        dropActionFeedback = fileURLs.count == 1
+            ? "Staged \(fileURLs[0].lastPathComponent) — pick an action or keep on Shelf"
+            : "Staged \(fileURLs.count) items — pick an action or keep on Shelf"
+    }
+
+    public func performDropAction(_ action: DropActionKind, on urls: [URL]) async {
+        let targets = urls.filter(\.isFileURL)
+        guard !targets.isEmpty else { return }
+        let message = await DropActionExecutor.execute(
+            action,
+            urls: targets,
+            onAddToShelf: { [weak self] added in
+                self?.addDroppedFiles(added)
+            }
+        )
+        dropActionFeedback = message
+        if action == .trash {
+            let trashedPaths = Set(targets.map(\.path))
+            pinnedOrDroppedClips.removeAll { trashedPaths.contains($0.path) }
+            watchedScreenshots.removeAll { trashedPaths.contains($0.path) }
+            persistence.savePinnedClips(pinnedOrDroppedClips)
+            clips = mergeClips()
+            pendingActionURLs.removeAll { trashedPaths.contains($0.path) }
+        } else if action == .eject {
+            pendingActionURLs.removeAll()
+        }
+    }
+
+    public func dismissDropActionBanner() {
+        pendingActionURLs.removeAll()
+        dropActionFeedback = nil
+    }
+
+    // MARK: - Hub, Weather, Sleep & Wellbeing
+
+    public func refreshWeather(force: Bool = false) {
+        if !force, let lastWeatherRefreshAt, Date().timeIntervalSince(lastWeatherRefreshAt) < 15 * 60 {
+            return
+        }
+        lastWeatherRefreshAt = Date()
+        weatherService.refresh(city: settings.weatherCity, unit: settings.weatherUnit)
+    }
+
+    public func togglePreventSleep() {
+        settings.preventSleepEnabled.toggle()
+    }
+
+    public func requestWorkspaceInputFocus(seed: String = "") {
+        if !seed.isEmpty {
+            pendingWorkspaceTypedSeed += seed
+        }
+        workspaceFocusRequestNonce &+= 1
+    }
+
+    public func toggleDarkModeWithHUD() {
+        systemService.toggleDarkMode()
+        postTransientLiveActivity(
+            TransientLiveActivity(
+                category: .systemHUD,
+                title: "Appearance Updated",
+                subtitle: "Toggled macOS Dark Mode",
+                badgeText: "HUD",
+                symbolName: "circle.lefthalf.filled",
+                accentHex: "#38BDF8",
+                targetTab: .hub,
+                targetHubSection: .overview
+            )
+        )
+    }
+
+    @discardableResult
+    public func snapWindow(to zone: SnapZone) -> Result<String, SnapError> {
+        let result = snapService.snapFrontmostWindow(to: zone)
+        if case .success(let message) = result {
+            postTransientLiveActivity(
+                TransientLiveActivity(
+                    category: .systemHUD,
+                    title: "Window Snapped",
+                    subtitle: message,
+                    badgeText: zone.title,
+                    symbolName: "macwindow.split.2x2",
+                    accentHex: "#38BDF8",
+                    targetTab: .hub,
+                    targetHubSection: .snap
+                )
+            )
+        }
+        return result
+    }
+
+    public func postTransientLiveActivity(
+        _ activity: TransientLiveActivity,
+        durationSeconds: Double = 3.8
+    ) {
+        guard settings.showLiveActivityNudge, settings.showTransientLiveActivities else { return }
+        transientDismissTask?.cancel()
+        transientLiveActivity = activity
+        onHitRectNeedsUpdate?()
+
+        let expectedID = activity.id
+        transientDismissTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(Int(max(1.0, durationSeconds) * 1000)))
+            guard !Task.isCancelled, let self else { return }
+            if self.transientLiveActivity?.id == expectedID {
+                self.transientLiveActivity = nil
+                self.onHitRectNeedsUpdate?()
+            }
+        }
+    }
+
+    public func dismissTransientLiveActivity() {
+        transientDismissTask?.cancel()
+        transientDismissTask = nil
+        if transientLiveActivity != nil {
+            transientLiveActivity = nil
+            onHitRectNeedsUpdate?()
+        }
+    }
+
+    public func triggerLiveActivityPreview() {
+        let nextEventTitle = eventKit.upcomingEvents.first?.title
+        let summary = nextEventTitle.map { "\(openTaskCount) open · Next: \($0)" }
+            ?? "\(openTaskCount) open tasks · Focus ready"
+        postTransientLiveActivity(
+            TransientLiveActivity(
+                category: .notifications,
+                title: "Live Activity Active",
+                subtitle: summary,
+                badgeText: "LIVE",
+                symbolName: "bell.badge.fill",
+                accentHex: "#C3D3BD",
+                targetTab: .hub,
+                targetHubSection: .overview
+            ),
+            durationSeconds: 4.5
+        )
+    }
+
+    public func dayProgressFraction(now: Date = Date()) -> Double {
+        let cal = Calendar.current
+        let comps = cal.dateComponents([.hour, .minute], from: now)
+        let currentMinutes = Double((comps.hour ?? 9) * 60 + (comps.minute ?? 0))
+        let startMinutes = 8.0 * 60.0
+        let endMinutes = Double(max(12, min(24, settings.bedtimeHour))) * 60.0
+        guard endMinutes > startMinutes else { return 0.5 }
+        return min(1.0, max(0.0, (currentMinutes - startMinutes) / (endMinutes - startMinutes)))
+    }
+
+    public func shutdown() {
+        transientDismissTask?.cancel()
+        transientDismissTask = nil
+        if let screenUnlockObserver {
+            DistributedNotificationCenter.default().removeObserver(screenUnlockObserver)
+            self.screenUnlockObserver = nil
+        }
+        cameraMirror.stop()
+        audioEngine.stop()
+        voiceCapture.stopRecording()
+        mediaService.stopMonitoring()
+        systemService.stopMonitoring()
+        screenTimeService.stopTracking()
+        healthService.stop()
+        snapService.stop()
+        clipsWatcher?.stop()
+        hotKeyManager?.unregister()
+        nudgeRefreshTimer?.invalidate()
+        nudgeRefreshTimer = nil
+    }
+
+    private func mergeClips() -> [ClipItem] {
+        var seenPaths: Set<String> = []
+        var merged: [ClipItem] = []
+
+        for item in pinnedOrDroppedClips {
+            if FileManager.default.fileExists(atPath: item.path), seenPaths.insert(item.path).inserted {
+                merged.append(item)
+            }
+        }
+        for item in watchedScreenshots {
+            if FileManager.default.fileExists(atPath: item.path), seenPaths.insert(item.path).inserted {
+                merged.append(item)
+            }
+        }
+        return merged.sorted { lhs, rhs in
+            if lhs.isPinned != rhs.isPinned {
+                return lhs.isPinned
+            }
+            return lhs.addedAt > rhs.addedAt
+        }
+    }
+
+    // MARK: - Camera & Travel Time
+
+    public func updateMirrorActivation() {
+        if isExpanded && activeTab == .mirror {
+            Task { await cameraMirror.requestAndStart() }
+        } else {
+            cameraMirror.stop()
+        }
+    }
+
+    public func refreshTravelTimes() {
+        travelTimeService.estimateTravelTimesIfPossible(for: eventKit.upcomingEvents) { [weak self] location, mins in
+            self?.eventKit.updateTravelTime(minutes: mins, forLocation: location)
+        }
+    }
+
+    // MARK: - Private Setup & Side Effects
+
+    private func setupIntegrations() {
+        eventKit.onEventsRefreshed = { [weak self] _ in
+            self?.refreshTravelTimes()
+            self?.onHitRectNeedsUpdate?()
+        }
+        eventKit.refreshEvents()
+
+        let watcher = ClipsWatcher { [weak self] items in
+            self?.watchedScreenshots = items
+            if let self {
+                self.clips = self.mergeClips()
+            }
+        }
+        self.clipsWatcher = watcher
+        if settings.watchScreenshots {
+            watcher.start()
+        }
+
+        let hk = GlobalHotKeyManager { [weak self] in
+            self?.onRequestPanelToggle?()
+        }
+        self.hotKeyManager = hk
+        if settings.globalShortcutEnabled {
+            hk.register(style: settings.shortcutStyle)
+        }
+
+        // Refresh timer state, weather, and live nudge window periodically
+        nudgeRefreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if self.timer.state != self.lastObservedTimerState {
+                    self.lastObservedTimerState = self.timer.state
+                    self.syncAmbientAudio()
+                }
+                self.onHitRectNeedsUpdate?()
+                self.refreshWeather(force: false)
+            }
+        }
+
+        healthService.onEyeBreakDue = { [weak self] in
+            guard let self else { return }
+            self.onHitRectNeedsUpdate?()
+            self.sendNotification(
+                title: "20-20-20 Eye Break",
+                body: "Look at something 20 feet away for 20 seconds."
+            )
+        }
+        healthService.setEyeBreakReminder(enabled: settings.eyeBreakReminderEnabled)
+        mediaService.preferredPlayer = settings.preferredMusicPlayer
+        mediaService.onTrackChanged = { [weak self] track in
+            self?.postTransientLiveActivity(
+                TransientLiveActivity(
+                    category: .media,
+                    title: track.title,
+                    subtitle: track.artist.isEmpty ? track.appName : "\(track.artist) · \(track.appName)",
+                    badgeText: track.appName,
+                    symbolName: "music.note",
+                    accentHex: "#EE9E5B",
+                    targetTab: .hub,
+                    targetHubSection: .overview
+                )
+            )
+        }
+        mediaService.startMonitoring()
+
+        systemService.onBluetoothEvent = { [weak self] dev, isLow in
+            self?.postTransientLiveActivity(
+                TransientLiveActivity(
+                    category: .bluetooth,
+                    title: isLow ? "\(dev.name) Low" : "\(dev.name) Connected",
+                    subtitle: isLow ? "Accessory battery at \(dev.percent)%" : "Battery \(dev.percent)%",
+                    badgeText: "\(dev.percent)%",
+                    symbolName: dev.systemImage,
+                    accentHex: isLow ? "#FA7070" : "#38BDF8",
+                    targetTab: .hub,
+                    targetHubSection: .overview
+                ),
+                durationSeconds: 4.2
+            )
+        }
+        systemService.onLowBattery = { [weak self] pct in
+            self?.postTransientLiveActivity(
+                TransientLiveActivity(
+                    category: .systemHUD,
+                    title: "Low Mac Battery",
+                    subtitle: "\(pct)% remaining — plug in power adapter",
+                    badgeText: "\(pct)%",
+                    symbolName: "battery.25",
+                    accentHex: "#FA7070",
+                    targetTab: .hub,
+                    targetHubSection: .overview
+                ),
+                durationSeconds: 4.5
+            )
+        }
+        systemService.startMonitoring()
+        systemService.setPreventSleep(settings.preventSleepEnabled)
+        screenTimeService.startTracking()
+        snapService.updateTopEdgeDragSnap(enabled: settings.snapOnTopEdgeDrag)
+        onPrivacyModeChanged?(settings.hideInScreenCapture)
+        refreshWeather(force: true)
+
+        screenUnlockObserver = DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.apple.screenIsUnlocked"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let nextMeeting = self.eventKit.upcomingEvents.first?.title
+                let subtitle = nextMeeting.map { "\(self.openTaskCount) open · Next: \($0)" }
+                    ?? "\(self.openTaskCount) open tasks ready"
+                self.postTransientLiveActivity(
+                    TransientLiveActivity(
+                        category: .sessionLock,
+                        title: "Welcome Back",
+                        subtitle: subtitle,
+                        badgeText: "UNLOCKED",
+                        symbolName: "lock.open.fill",
+                        accentHex: "#C3D3BD",
+                        targetTab: .today
+                    ),
+                    durationSeconds: 4.0
+                )
+            }
+        }
+    }
+
+    private func applySettingsSideEffects(from old: AppSettings) {
+        if old.watchScreenshots != settings.watchScreenshots {
+            if settings.watchScreenshots {
+                clipsWatcher?.start()
+            } else {
+                clipsWatcher?.stop()
+                watchedScreenshots = []
+                clips = mergeClips()
+            }
+        }
+        if old.globalShortcutEnabled != settings.globalShortcutEnabled || old.shortcutStyle != settings.shortcutStyle {
+            if settings.globalShortcutEnabled {
+                hotKeyManager?.register(style: settings.shortcutStyle)
+            } else {
+                hotKeyManager?.unregister()
+            }
+        }
+        if old.focusMinutes != settings.focusMinutes && timer.state == .idle && timer.phase == .focus {
+            timer.configure(minutes: settings.focusMinutes, phase: .focus)
+        }
+        if old.focusSoundscape != settings.focusSoundscape || old.focusSoundVolume != settings.focusSoundVolume {
+            syncAmbientAudio()
+        }
+        if old.collapsedWidth != settings.collapsedWidth
+            || old.displayMode != settings.displayMode
+            || old.isWideDrawer != settings.isWideDrawer {
+            onLayoutSettingsChanged?()
+        }
+        if old.showLiveActivityNudge != settings.showLiveActivityNudge
+            || old.showTransientLiveActivities != settings.showTransientLiveActivities
+            || old.showMediaInNotch != settings.showMediaInNotch {
+            if !settings.showLiveActivityNudge || !settings.showTransientLiveActivities {
+                dismissTransientLiveActivity()
+            }
+            onHitRectNeedsUpdate?()
+        }
+        if old.preferredMusicPlayer != settings.preferredMusicPlayer {
+            mediaService.preferredPlayer = settings.preferredMusicPlayer
+            postTransientLiveActivity(
+                TransientLiveActivity(
+                    category: .media,
+                    title: "Music Player: \(settings.preferredMusicPlayer.label)",
+                    subtitle: settings.preferredMusicPlayer == .youTubeMusic
+                        ? "Tracking Chrome / Safari music.youtube.com"
+                        : "Source updated",
+                    badgeText: settings.preferredMusicPlayer.shortLabel,
+                    symbolName: "music.note",
+                    accentHex: "#EE9E5B",
+                    targetTab: .hub,
+                    targetHubSection: .overview
+                )
+            )
+            onHitRectNeedsUpdate?()
+        }
+        if old.hideInScreenCapture != settings.hideInScreenCapture {
+            onPrivacyModeChanged?(settings.hideInScreenCapture)
+            postTransientLiveActivity(
+                TransientLiveActivity(
+                    category: .systemHUD,
+                    title: settings.hideInScreenCapture ? "Screen Privacy On" : "Screen Privacy Off",
+                    subtitle: settings.hideInScreenCapture ? "Notch hidden from screen recordings" : "Visible in screen recordings",
+                    badgeText: settings.hideInScreenCapture ? "HIDDEN" : "VISIBLE",
+                    symbolName: settings.hideInScreenCapture ? "eye.slash.fill" : "eye.fill",
+                    accentHex: "#B5ADE2",
+                    targetTab: .settings
+                )
+            )
+        }
+        if old.preventSleepEnabled != settings.preventSleepEnabled {
+            systemService.setPreventSleep(settings.preventSleepEnabled)
+            postTransientLiveActivity(
+                TransientLiveActivity(
+                    category: .systemHUD,
+                    title: settings.preventSleepEnabled ? "Never Sleep On" : "Never Sleep Off",
+                    subtitle: settings.preventSleepEnabled ? "Mac display kept awake" : "Normal sleep schedule restored",
+                    badgeText: settings.preventSleepEnabled ? "AWAKE" : "OFF",
+                    symbolName: "cup.and.saucer.fill",
+                    accentHex: "#FAC03D",
+                    targetTab: .hub,
+                    targetHubSection: .overview
+                )
+            )
+        }
+        if old.eyeBreakReminderEnabled != settings.eyeBreakReminderEnabled {
+            healthService.setEyeBreakReminder(enabled: settings.eyeBreakReminderEnabled)
+            onHitRectNeedsUpdate?()
+        }
+        if old.snapOnTopEdgeDrag != settings.snapOnTopEdgeDrag {
+            snapService.updateTopEdgeDragSnap(enabled: settings.snapOnTopEdgeDrag)
+        }
+        if old.weatherCity != settings.weatherCity || old.weatherUnit != settings.weatherUnit {
+            refreshWeather(force: true)
+        }
+    }
+
+    private func handleTimerCompleted(phase: TimerPhase, minutes: Int) {
+        if phase == .focus {
+            let today = DailyFocusStats.todayKey()
+            if focusStats.dayKey != today {
+                focusStats = DailyFocusStats(dayKey: today)
+            }
+            focusStats.completedSessions += 1
+            focusStats.focusedMinutes += minutes
+            persistence.saveStats(focusStats)
+
+            let currentHour = Calendar.current.component(.hour, from: Date())
+            updateTodayActivityRecord { record in
+                record.focusedMinutes += minutes
+                record.hourlyFocusMinutes[currentHour, default: 0] += minutes
+            }
+
+            if let activeFocusTaskID,
+               let idx = tasks.firstIndex(where: { $0.id == activeFocusTaskID }) {
+                tasks[idx].focusedMinutes += minutes
+                persistence.saveTasks(tasks)
+            }
+        }
+
+        if settings.soundEnabled {
+            NSSound(named: NSSound.Name("Glass"))?.play()
+        }
+        sendNotification(
+            title: phase == .focus ? "Focus session complete" : "Break finished",
+            body: phase == .focus
+                ? "Great work — \(minutes)m focus block finished. Take a quick break."
+                : "Ready for your next focus session."
+        )
+        postTransientLiveActivity(
+            TransientLiveActivity(
+                category: .pomodoro,
+                title: phase == .focus ? "Focus Complete" : "Break Finished",
+                subtitle: phase == .focus ? "\(minutes)m block logged to Insights" : "Ready for your next block",
+                badgeText: "DONE",
+                symbolName: "checkmark.seal.fill",
+                accentHex: "#21C473",
+                targetTab: .insights
+            ),
+            durationSeconds: 4.5
+        )
+
+        let nextPhase: TimerPhase = (phase == .focus) ? .shortBreak : .focus
+        let nextMinutes = (nextPhase == .focus) ? settings.focusMinutes : settings.shortBreakMinutes
+        timer.configure(minutes: nextMinutes, phase: nextPhase)
+        syncAmbientAudio()
+        triggerMascotPulse()
+    }
+
+    private func recordTaskCompletion(delta: Int) {
+        updateTodayActivityRecord { record in
+            record.completedTasks = max(0, record.completedTasks + delta)
+        }
+    }
+
+    private func updateTodayActivityRecord(_ mutate: (inout DailyActivityRecord) -> Void) {
+        let key = DailyFocusStats.todayKey()
+        if let idx = activityHistory.firstIndex(where: { $0.dayKey == key }) {
+            mutate(&activityHistory[idx])
+        } else {
+            var record = DailyActivityRecord(dayKey: key)
+            mutate(&record)
+            activityHistory.append(record)
+        }
+        if activityHistory.count > 60 {
+            activityHistory = Array(activityHistory.sorted { $0.dayKey < $1.dayKey }.suffix(60))
+        }
+        persistence.saveActivityHistory(activityHistory)
+    }
+
+    private func sendNotification(title: String, body: String) {
+        guard Bundle.main.bundleURL.pathExtension == "app",
+              Bundle.main.bundleIdentifier != nil
+        else {
+            return
+        }
+        Self.deliverLocalNotification(title: title, body: body)
+    }
+
+    nonisolated private static func deliverLocalNotification(title: String, body: String) {
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+            center.add(request)
+        }
+    }
+
+    private func triggerMascotPulse() {
+        lastTaskCompletedPulse = true
+        Task {
+            try? await Task.sleep(for: .milliseconds(700))
+            lastTaskCompletedPulse = false
+        }
+    }
+}
