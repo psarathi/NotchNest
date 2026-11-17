@@ -10,20 +10,52 @@ RESOURCES_DIR="$CONTENTS/Resources"
 ICONSET_DIR="$BUILD_DIR/AppIcon.iconset"
 
 CONFIGURATION="${1:-release}"
-
-echo "Building NotchNest ($CONFIGURATION, x86_64)..."
-swift build --package-path "$ROOT_DIR" --disable-sandbox -c "$CONFIGURATION" --arch x86_64
-
-BIN_PATH="$(swift build --package-path "$ROOT_DIR" --disable-sandbox -c "$CONFIGURATION" --arch x86_64 --show-bin-path)/NotchNest"
-if [[ ! -f "$BIN_PATH" ]]; then
-    echo "Error: Binary not found at $BIN_PATH" >&2
-    exit 1
+HOST_ARCH="$(uname -m)"
+if [[ "$HOST_ARCH" == "x86_64" ]] && [[ "$(sysctl -in hw.optional.arm64 2>/dev/null || echo 0)" == "1" ]]; then
+    HOST_ARCH="arm64"
 fi
+TARGET_ARCH="${2:-$HOST_ARCH}"
+
+case "$TARGET_ARCH" in
+    native)
+        TARGET_ARCH="$HOST_ARCH"
+        ARCH_LIST=("$TARGET_ARCH")
+        ARCH_LABEL="$TARGET_ARCH"
+        ;;
+    arm64|x86_64)
+        ARCH_LIST=("$TARGET_ARCH")
+        ARCH_LABEL="$TARGET_ARCH"
+        ;;
+    universal)
+        ARCH_LIST=(arm64 x86_64)
+        ARCH_LABEL="universal (arm64 + x86_64)"
+        ;;
+    *)
+        echo "Unsupported arch '$TARGET_ARCH'. Use: native, universal, arm64, or x86_64." >&2
+        exit 1
+        ;;
+esac
+
+echo "Building NotchNest ($CONFIGURATION, $ARCH_LABEL)..."
+BUILT_BINS=()
+for arch in "${ARCH_LIST[@]}"; do
+    swift build --package-path "$ROOT_DIR" --disable-sandbox -c "$CONFIGURATION" --arch "$arch"
+    BIN_PATH="$(swift build --package-path "$ROOT_DIR" --disable-sandbox -c "$CONFIGURATION" --arch "$arch" --show-bin-path)/NotchNest"
+    if [[ ! -f "$BIN_PATH" ]]; then
+        echo "Error: Binary not found at $BIN_PATH" >&2
+        exit 1
+    fi
+    BUILT_BINS+=("$BIN_PATH")
+done
 
 rm -rf "$APP_BUNDLE" "$ICONSET_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
-cp "$BIN_PATH" "$MACOS_DIR/NotchNest"
+if [[ ${#BUILT_BINS[@]} -gt 1 ]]; then
+    lipo -create "${BUILT_BINS[@]}" -output "$MACOS_DIR/NotchNest"
+else
+    cp "${BUILT_BINS[1]}" "$MACOS_DIR/NotchNest"
+fi
 chmod +x "$MACOS_DIR/NotchNest"
 
 # Generate original app icon (.icns) directly

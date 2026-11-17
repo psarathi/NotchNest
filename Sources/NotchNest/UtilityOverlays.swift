@@ -155,7 +155,7 @@ struct DiagnosticsOverlayView: View {
             }
 
             VStack(alignment: .leading, spacing: 5) {
-                diagRow("Architecture", "Intel x86_64 Clean-Room Build")
+                diagRow("Architecture", Self.runtimeArchitectureLabel)
                 diagRow("Calendar Events Loaded", "\(model.eventKit.upcomingEvents.count) upcoming (7-day window)")
                 diagRow("Zoom/Call Links Found", "\(model.eventKit.upcomingEvents.filter { $0.meetingURL != nil }.count) event(s)")
                 diagRow("Audio Engine", model.audioEngine.isPlaying ? "Playing (\(model.audioEngine.activeSoundscape.label))" : "Idle (\(model.settings.focusSoundscape.label))")
@@ -237,6 +237,16 @@ struct DiagnosticsOverlayView: View {
                 .stroke(Color.white.opacity(0.14), lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.55), radius: 22, y: 8)
+    }
+
+    private static var runtimeArchitectureLabel: String {
+        #if arch(arm64)
+        "Apple Silicon (arm64) Clean-Room Build"
+        #elseif arch(x86_64)
+        "Intel (x86_64) Clean-Room Build"
+        #else
+        "macOS Native Clean-Room Build"
+        #endif
     }
 
     private var locationAuthLabel: String {

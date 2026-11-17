@@ -1,6 +1,6 @@
 # NotchNest
 
-An original, clean-room **Intel (`x86_64`) native** macOS utility built with Swift 6, SwiftUI, and AppKit that turns the top center of any display into an interactive productivity and system hub.
+An original, clean-room **Universal (`arm64` Apple Silicon + `x86_64` Intel) native** macOS utility built with Swift 6, SwiftUI, and AppKit that turns the top center of any display into an interactive productivity and system hub.
 
 ## Features
 - **Virtual & Hardware Notch Adaptive**: Centers a dark curved notch pill in the menu bar on non-notched Intel Macs and external displays, and adapts cleanly on hardware-notched MacBooks.
@@ -33,15 +33,25 @@ An original, clean-room **Intel (`x86_64`) native** macOS utility built with Swi
 ## Build & Run
 
 ```bash
-# Run unit tests (x86_64)
-swift test --disable-sandbox --arch x86_64
+# Run unit tests natively (Apple Silicon or Intel)
+swift test --disable-sandbox
 
-# Build release x86_64 .app bundle at build/NotchNest.app
+# Build release .app bundle for the current Mac's native architecture (arm64 or x86_64)
 ./scripts/build_app.sh release
+
+# Or build a Universal (arm64 + x86_64) .app bundle for both M-series and Intel Macs
+./scripts/build_app.sh release universal
 
 # Verify code signature & launch
 codesign --verify --deep --strict build/NotchNest.app
 open build/NotchNest.app
+```
+
+When copying an ad-hoc signed `NotchNest.app` to another Mac via AirDrop or Finder, strip Gatekeeper quarantine once before launching:
+
+```bash
+xattr -cr /Applications/NotchNest.app
+open /Applications/NotchNest.app
 ```
 
 ## License
