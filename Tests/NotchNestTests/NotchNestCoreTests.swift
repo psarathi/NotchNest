@@ -685,4 +685,122 @@ struct NotchNestCoreTests {
         #expect(parsedYTM?.info.durationSeconds == 120.0)
         #expect(parsedYTM?.info.progressFraction == 0.25)
     }
+
+    @Test("Universal Workspace command prefixes parse strictly without hijacking normal tasks")
+    func workspaceQuickCommandParsing() {
+        #expect(WorkspaceQuickCommand.parse("note: Buy filter cartridges") == .appendNote("Buy filter cartridges"))
+        #expect(WorkspaceQuickCommand.parse("N: Sync API schema") == .appendNote("Sync API schema"))
+        #expect(WorkspaceQuickCommand.parse("25m focus") == .startFocus(minutes: 25))
+        #expect(WorkspaceQuickCommand.parse("focus 45") == .startFocus(minutes: 45))
+        #expect(WorkspaceQuickCommand.parse("focus 15 min") == .startFocus(minutes: 15))
+        #expect(WorkspaceQuickCommand.parse("tr es: Good morning") == .translate(targetLanguage: "Spanish", text: "Good morning"))
+        #expect(WorkspaceQuickCommand.parse("translate ja: Thank you") == .translate(targetLanguage: "Japanese", text: "Thank you"))
+        #expect(WorkspaceQuickCommand.parse("tr: Bonjour") == .translate(targetLanguage: nil, text: "Bonjour"))
+        #expect(WorkspaceQuickCommand.parse("snap left") == .snapWindow(.leftHalf))
+        #expect(WorkspaceQuickCommand.parse("snap right half") == .snapWindow(.rightHalf))
+        #expect(WorkspaceQuickCommand.parse("snap max") == .snapWindow(.maximize))
+        #expect(WorkspaceQuickCommand.parse("snap bottom right") == .snapWindow(.bottomRightQuarter))
+
+        // Normal task phrases must NOT be hijacked as commands
+        #expect(WorkspaceQuickCommand.parse("Focus on design slides") == nil)
+        #expect(WorkspaceQuickCommand.parse("25m focus on Q4 roadmap") == nil)
+        #expect(WorkspaceQuickCommand.parse("Note about deployment tomorrow") == nil)
+        #expect(WorkspaceQuickCommand.parse("Translate API docs tomorrow") == nil)
+        #expect(WorkspaceQuickCommand.parse("Snap photos at the park") == nil)
+        #expect(WorkspaceQuickCommand.parse("focus 0") == nil)
+    }
+
+    @Test("Clipboard history filters sensitive sources, deduplicates, pins, persists, and generates QR codes")
+    @MainActor
+    func clipboardHistoryAndQR() {
+        #expect(ClipboardHistoryService.isSensitivePasteboard(
+            types: [NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"), .string],
+            frontmostBundleID: "com.apple.Safari"
+        ))
+        #expect(ClipboardHistoryService.isSensitivePasteboard(
+            types: [NSPasteboard.PasteboardType("org.nspasteboard.TransientType")],
+            frontmostBundleID: nil
+        ))
+        #expect(ClipboardHistoryService.isSensitivePasteboard(
+            types: [.string],
+            frontmostBundleID: "com.1password.1password"
+        ))
+        #expect(ClipboardHistoryService.isSensitivePasteboard(
+            types: [.string],
+            frontmostBundleID: "com.apple.Passwords"
+        ))
+        #expect(!ClipboardHistoryService.isSensitivePasteboard(
+            types: [.string],
+            frontmostBundleID: "com.apple.Safari"
+        ))
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NotchNestClipboardTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let store = PersistenceStore(baseDirectory: tempDir)
+        let service = ClipboardHistoryService(persistence: store, maxUnpinnedEntries: 2)
+
+        service.recordText("  https://github.com/psarathi/NotchNest  ")
+        service.recordText("Alpha snippet")
+        service.recordText("Beta snippet")
+        #expect(service.entries.count == 2)
+        #expect(service.entries[0].text == "Beta snippet")
+        #expect(service.entries[1].text == "Alpha snippet")
+
+        // Pin Alpha, then add another unpinned item: pinned item survives cap!
+        service.togglePin(service.entries[1].id)
+        service.recordText("https://example.org/docs")
+        #expect(service.entries.count == 3)
+        #expect(service.entries.first?.isPinned == true)
+        #expect(service.entries.contains(where: { $0.isURL && $0.detectedURL?.host == "example.org" }))
+
+        // Reload from disk verifies persistence round-trip
+        let reloaded = ClipboardHistoryService(persistence: store, maxUnpinnedEntries: 2)
+        #expect(reloaded.entries.count == 3)
+        #expect(reloaded.entries.first?.text == "Alpha snippet")
+        reloaded.clearUnpinned()
+        #expect(reloaded.entries.count == 1)
+
+        // Offline QR code image generation
+        let qr = ClipboardHistoryService.qrCodeImage(for: "https://github.com/psarathi/NotchNest", size: 160)
+        #expect(qr != nil)
+        #expect((qr?.tiffRepresentation?.count ?? 0) > 100)
+        #expect(ClipboardHistoryService.qrCodeImage(for: "   ") == nil)
+    }
+
+    @Test("Model executes Workspace quick commands and decodes AppSettings defaults")
+    @MainActor
+    func modelCommandExecutionAndSettingsCompatibility() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NotchNestCommands-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let model = NotchNestModel(persistence: PersistenceStore(baseDirectory: tempDir), enableSystemIntegrations: false)
+        defer { model.shutdown() }
+
+        let executedNote = model.executeWorkspaceCommand(.appendNote("Review mic mute shortcut"))
+        #expect(executedNote)
+        let selectedNote = model.notes.first(where: { $0.id == model.selectedNoteID })
+        #expect(selectedNote?.body.contains("Review mic mute shortcut") == true)
+
+        let executedFocus = model.executeWorkspaceCommand(.startFocus(minutes: 15))
+        #expect(executedFocus)
+        #expect(model.timer.state == .running)
+        #expect(model.timer.phase == .focus)
+        #expect(model.timer.remainingSeconds == 15 * 60)
+
+        let executedTranslate = model.executeWorkspaceCommand(.translate(targetLanguage: "Spanish", text: "Good evening"))
+        #expect(executedTranslate)
+        #expect(model.devHubService.translationInput == "Good evening")
+        #expect(model.devHubService.translationTargetLanguage == "Spanish")
+        #expect(model.activeTab == .hub)
+        #expect(model.selectedHubSection == .devAI)
+
+        // Backward-compatibility check when older settings JSON lacks Phase 2 keys
+        let legacyData = Data("{}".utf8)
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: legacyData)
+        #expect(decoded.clipboardHistoryEnabled == true)
+        #expect(decoded.showMicIndicatorInNotch == true)
+    }
 }

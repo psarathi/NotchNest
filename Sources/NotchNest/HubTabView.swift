@@ -604,6 +604,44 @@ struct HubTabView: View {
                     model.systemService.lockScreen()
                 }
             }
+
+            Button {
+                model.toggleMicMuteWithHUD()
+            } label: {
+                let isMuted = model.systemService.isMicMuted
+                let hasMic = model.systemService.hasAudioInputDevice
+                let accent = isMuted ? NotchTheme.coralAlert : NotchTheme.sagePaper
+                HStack(spacing: 7) {
+                    Image(systemName: isMuted ? "mic.slash.fill" : "mic.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(hasMic ? accent : .white.opacity(0.45))
+
+                    Text(!hasMic ? "No Microphone Detected" : (isMuted ? "Microphone Muted" : "Microphone Live"))
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(isMuted ? NotchTheme.coralAlert : .white.opacity(0.88))
+
+                    Spacer()
+
+                    Text(hasMic ? "⌥M" : "—")
+                        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                        .foregroundStyle(isMuted ? NotchTheme.coralAlert : .white.opacity(0.6))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.white.opacity(0.08), in: Capsule())
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 7)
+                .background(
+                    (isMuted ? NotchTheme.coralAlert.opacity(0.16) : Color.white.opacity(0.05)),
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(isMuted ? NotchTheme.coralAlert.opacity(0.55) : Color.white.opacity(0.07), lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+            .help("Toggle default microphone mute (⌥M)")
         }
         .padding(11)
         .background(NotchTheme.cardSurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))

@@ -48,7 +48,12 @@ struct TodayTabView: View {
         return f
     }()
 
+    private var parsedCommandPreview: WorkspaceQuickCommand? {
+        WorkspaceQuickCommand.parse(draftTitle)
+    }
+
     private var parsedPreview: ParsedTaskDraft? {
+        guard parsedCommandPreview == nil else { return nil }
         let trimmed = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         let draft = NaturalLanguageTaskParser.parse(
@@ -264,8 +269,20 @@ struct TodayTabView: View {
                 }
             }
 
-            // Natural-language preview bar above quick entry
-            if let summary = parsedPreview?.previewSummary() {
+            // Natural-language & quick-command preview bar above quick entry
+            if let command = parsedCommandPreview {
+                HStack(spacing: 5) {
+                    Image(systemName: "command.circle.fill")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(NotchTheme.sageBadgeFill)
+                    Text(command.previewLabel)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(NotchTheme.sageInk.opacity(0.92))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .padding(.horizontal, 4)
+            } else if let summary = parsedPreview?.previewSummary() {
                 HStack(spacing: 5) {
                     Image(systemName: "sparkles")
                         .font(.system(size: 10, weight: .semibold))
@@ -297,7 +314,7 @@ struct TodayTabView: View {
                 .buttonStyle(.plain)
                 .help("Toggle high priority")
 
-                TextField("Add a task… (e.g. Call mom tomorrow 5pm #Personal)", text: $draftTitle)
+                TextField("Add task or command… (note:, 25m focus, tr es:, snap left)", text: $draftTitle)
                     .textFieldStyle(.plain)
                     .font(.system(size: 11.5, weight: .medium))
                     .foregroundStyle(NotchTheme.sageInk)
@@ -571,6 +588,14 @@ struct TodayTabView: View {
         model.voiceCapture.stopRecording()
         let trimmed = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+
+        if let command = WorkspaceQuickCommand.parse(trimmed) {
+            model.executeWorkspaceCommand(command)
+            draftTitle = ""
+            newPriority = .normal
+            return
+        }
+
         let targetBucket = model.bucket(forDayOffset: dayOffset)
         let targetDayKey = model.dayKey(forDayOffset: dayOffset)
         model.addParsedTask(

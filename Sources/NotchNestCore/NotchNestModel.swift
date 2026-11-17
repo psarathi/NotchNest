@@ -53,6 +53,7 @@ public final class NotchNestModel {
     public let voiceCapture: VoiceCaptureController
     public let travelTimeService: TravelTimeService
     public let systemService: SystemAndPowerService
+    public let clipboardService: ClipboardHistoryService
     public let mediaService: MediaPlaybackService
     public let weatherService: WeatherService
     public let screenTimeService: ScreenTimeService
@@ -94,6 +95,7 @@ public final class NotchNestModel {
         self.voiceCapture = VoiceCaptureController()
         self.travelTimeService = TravelTimeService()
         self.systemService = SystemAndPowerService()
+        self.clipboardService = ClipboardHistoryService(persistence: persistence)
         self.mediaService = MediaPlaybackService()
         self.weatherService = WeatherService()
         self.screenTimeService = ScreenTimeService(persistence: persistence)
@@ -892,6 +894,101 @@ public final class NotchNestModel {
         persistence.saveNotes(notes)
     }
 
+    public func appendToActiveNote(_ rawText: String) {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        if notes.isEmpty {
+            let created = NoteEntry(title: "Daily Notepad", body: trimmed)
+            notes = [created]
+            selectedNoteID = created.id
+            persistence.saveNotes(notes)
+            return
+        }
+
+        let idx = notes.firstIndex(where: { $0.id == selectedNoteID }) ?? 0
+        selectedNoteID = notes[idx].id
+        let existing = notes[idx].body
+        let appended: String
+        if existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            appended = trimmed
+        } else if existing.hasSuffix("\n") {
+            appended = existing + trimmed
+        } else {
+            appended = existing + "\n" + trimmed
+        }
+        updateNoteBody(notes[idx].id, body: appended)
+    }
+
+    public func sendToTranslator(
+        _ text: String,
+        targetLanguage: String? = nil,
+        triggerTranslation: Bool = true
+    ) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        devHubService.translationInput = trimmed
+        if let targetLanguage, !targetLanguage.isEmpty {
+            devHubService.translationTargetLanguage = targetLanguage
+        }
+        selectedHubSection = .devAI
+        activeTab = .hub
+        onRequestPanelExpand?(.hub)
+
+        if triggerTranslation {
+            let currentSettings = settings
+            Task { @MainActor [weak self] in
+                await self?.devHubService.translate(settings: currentSettings)
+            }
+        }
+    }
+
+    @discardableResult
+    public func executeWorkspaceCommand(_ command: WorkspaceQuickCommand) -> Bool {
+        switch command {
+        case .appendNote(let text):
+            appendToActiveNote(text)
+            postTransientLiveActivity(
+                TransientLiveActivity(
+                    category: .systemHUD,
+                    title: "Added to Note",
+                    subtitle: text,
+                    badgeText: "NOTE",
+                    symbolName: "note.text",
+                    accentHex: "#B8D0BA",
+                    targetTab: .notes
+                )
+            )
+            return true
+
+        case .startFocus(let minutes):
+            isAmbientPreviewActive = false
+            timer.start(minutes: minutes, phase: .focus)
+            syncAmbientAudio()
+            postTransientLiveActivity(
+                TransientLiveActivity(
+                    category: .pomodoro,
+                    title: "Focus · \(minutes)m",
+                    subtitle: activeFocusTask?.title ?? settings.focusSoundscape.label,
+                    badgeText: "FOCUS",
+                    symbolName: "flame.fill",
+                    accentHex: "#EE9E5B",
+                    targetTab: .timer
+                )
+            )
+            onHitRectNeedsUpdate?()
+            return true
+
+        case .translate(let targetLanguage, let text):
+            sendToTranslator(text, targetLanguage: targetLanguage, triggerTranslation: true)
+            return true
+
+        case .snapWindow(let zone):
+            _ = snapWindow(to: zone)
+            return true
+        }
+    }
+
     @discardableResult
     public func convertNoteLinesToTasks(_ id: UUID) -> Int {
         guard let note = notes.first(where: { $0.id == id }) else { return 0 }
@@ -1066,6 +1163,42 @@ public final class NotchNestModel {
     }
 
     @discardableResult
+    public func toggleMicMuteWithHUD() -> Bool {
+        systemService.refreshMicState()
+        guard systemService.hasAudioInputDevice else {
+            postTransientLiveActivity(
+                TransientLiveActivity(
+                    category: .systemHUD,
+                    title: "No Microphone",
+                    subtitle: "No active audio input device detected",
+                    badgeText: "AUDIO",
+                    symbolName: "mic.slash",
+                    accentHex: "#FA7070",
+                    targetTab: .hub,
+                    targetHubSection: .overview
+                )
+            )
+            return false
+        }
+
+        let muted = systemService.toggleMicMute()
+        postTransientLiveActivity(
+            TransientLiveActivity(
+                category: .systemHUD,
+                title: muted ? "Mic Muted" : "Mic Live",
+                subtitle: muted ? "Default input muted · ⌥M to unmute" : "Default microphone active",
+                badgeText: muted ? "MUTED" : "LIVE",
+                symbolName: muted ? "mic.slash.fill" : "mic.fill",
+                accentHex: muted ? "#FA7070" : "#B8D0BA",
+                targetTab: .hub,
+                targetHubSection: .overview
+            )
+        )
+        onHitRectNeedsUpdate?()
+        return muted
+    }
+
+    @discardableResult
     public func snapWindow(to zone: SnapZone) -> Result<String, SnapError> {
         let result = snapService.snapFrontmostWindow(to: zone)
         if case .success(let message) = result {
@@ -1154,6 +1287,7 @@ public final class NotchNestModel {
         audioEngine.stop()
         voiceCapture.stopRecording()
         mediaService.stopMonitoring()
+        clipboardService.stopMonitoring()
         systemService.stopMonitoring()
         screenTimeService.stopTracking()
         healthService.stop()
@@ -1300,6 +1434,9 @@ public final class NotchNestModel {
             )
         }
         systemService.startMonitoring()
+        if settings.clipboardHistoryEnabled {
+            clipboardService.startMonitoring()
+        }
         systemService.setPreventSleep(settings.preventSleepEnabled)
         screenTimeService.startTracking()
         snapService.updateTopEdgeDragSnap(enabled: settings.snapOnTopEdgeDrag)
@@ -1342,6 +1479,13 @@ public final class NotchNestModel {
                 clips = mergeClips()
             }
         }
+        if old.clipboardHistoryEnabled != settings.clipboardHistoryEnabled {
+            if settings.clipboardHistoryEnabled {
+                clipboardService.startMonitoring()
+            } else {
+                clipboardService.stopMonitoring()
+            }
+        }
         if old.globalShortcutEnabled != settings.globalShortcutEnabled || old.shortcutStyle != settings.shortcutStyle {
             if settings.globalShortcutEnabled {
                 hotKeyManager?.register(style: settings.shortcutStyle)
@@ -1362,7 +1506,8 @@ public final class NotchNestModel {
         }
         if old.showLiveActivityNudge != settings.showLiveActivityNudge
             || old.showTransientLiveActivities != settings.showTransientLiveActivities
-            || old.showMediaInNotch != settings.showMediaInNotch {
+            || old.showMediaInNotch != settings.showMediaInNotch
+            || old.showMicIndicatorInNotch != settings.showMicIndicatorInNotch {
             if !settings.showLiveActivityNudge || !settings.showTransientLiveActivities {
                 dismissTransientLiveActivity()
             }

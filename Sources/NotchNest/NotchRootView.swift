@@ -141,6 +141,23 @@ struct NotchRootView: View {
             }
 
             collapsedRightBadge(track: track)
+
+            if model.settings.showMicIndicatorInNotch,
+               model.systemService.hasAudioInputDevice,
+               model.systemService.isMicMuted {
+                Button {
+                    model.toggleMicMuteWithHUD()
+                } label: {
+                    Image(systemName: "mic.slash.fill")
+                        .font(.system(size: 9.5, weight: .bold))
+                        .foregroundStyle(NotchTheme.coralAlert)
+                        .frame(width: 20, height: 20)
+                        .background(NotchTheme.coralAlert.opacity(0.20), in: Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Microphone muted (⌥M to unmute)")
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

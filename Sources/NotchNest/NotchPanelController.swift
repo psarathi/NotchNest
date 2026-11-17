@@ -561,6 +561,10 @@ final class NotchPanelController {
                 self.model.snoozeActiveNudge(minutes: 5)
                 return nil
             }
+            if flags == .option, chars == "m" {
+                self.model.toggleMicMuteWithHUD()
+                return nil
+            }
             if flags == .command, let chars {
                 let primary = NotchTab.primaryTabs
                 if let digit = Int(chars), digit >= 1, digit <= primary.count {

@@ -595,6 +595,49 @@ public enum DropActionKind: String, CaseIterable, Sendable, Identifiable {
     }
 }
 
+public struct ClipboardEntry: Identifiable, Codable, Equatable, Sendable {
+    public var id: UUID
+    public var text: String
+    public var addedAt: Date
+    public var isPinned: Bool
+    public var isURL: Bool
+
+    public init(
+        id: UUID = UUID(),
+        text: String,
+        addedAt: Date = Date(),
+        isPinned: Bool = false,
+        isURL: Bool? = nil
+    ) {
+        self.id = id
+        self.text = text
+        self.addedAt = addedAt
+        self.isPinned = isPinned
+        if let isURL {
+            self.isURL = isURL
+        } else {
+            self.isURL = Self.detectHTTPURL(from: text) != nil
+        }
+    }
+
+    public var detectedURL: URL? {
+        Self.detectHTTPURL(from: text)
+    }
+
+    public static func detectHTTPURL(from raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.contains(where: \.isWhitespace),
+              trimmed.count <= 2048,
+              let url = URL(string: trimmed),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.host?.isEmpty == false else {
+            return nil
+        }
+        return url
+    }
+}
+
 public struct DailyHealthStats: Codable, Equatable, Sendable {
     public var dayKey: String
     public var waterGlasses: Int
@@ -740,6 +783,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var showLiveActivityNudge: Bool
     public var showTransientLiveActivities: Bool
     public var showMediaInNotch: Bool
+    public var showMicIndicatorInNotch: Bool
     public var preferredMusicPlayer: MusicPlayerPreference
     public var autoPauseMediaOnJoin: Bool
     public var createMeetingNoteOnJoin: Bool
@@ -750,6 +794,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var shortcutStyle: GlobalShortcutStyle
     public var syncReminders: Bool
     public var watchScreenshots: Bool
+    public var clipboardHistoryEnabled: Bool
     public var focusMinutes: Int
     public var shortBreakMinutes: Int
     public var focusSoundscape: FocusSoundscape
@@ -783,6 +828,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         showLiveActivityNudge: Bool = true,
         showTransientLiveActivities: Bool = true,
         showMediaInNotch: Bool = true,
+        showMicIndicatorInNotch: Bool = true,
         preferredMusicPlayer: MusicPlayerPreference = .automatic,
         autoPauseMediaOnJoin: Bool = true,
         createMeetingNoteOnJoin: Bool = false,
@@ -793,6 +839,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         shortcutStyle: GlobalShortcutStyle = .optionSpace,
         syncReminders: Bool = false,
         watchScreenshots: Bool = true,
+        clipboardHistoryEnabled: Bool = true,
         focusMinutes: Int = 25,
         shortBreakMinutes: Int = 5,
         focusSoundscape: FocusSoundscape = .rain,
@@ -825,6 +872,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.showLiveActivityNudge = showLiveActivityNudge
         self.showTransientLiveActivities = showTransientLiveActivities
         self.showMediaInNotch = showMediaInNotch
+        self.showMicIndicatorInNotch = showMicIndicatorInNotch
         self.preferredMusicPlayer = preferredMusicPlayer
         self.autoPauseMediaOnJoin = autoPauseMediaOnJoin
         self.createMeetingNoteOnJoin = createMeetingNoteOnJoin
@@ -835,6 +883,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.shortcutStyle = shortcutStyle
         self.syncReminders = syncReminders
         self.watchScreenshots = watchScreenshots
+        self.clipboardHistoryEnabled = clipboardHistoryEnabled
         self.focusMinutes = focusMinutes
         self.shortBreakMinutes = shortBreakMinutes
         self.focusSoundscape = focusSoundscape
@@ -869,6 +918,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case showLiveActivityNudge
         case showTransientLiveActivities
         case showMediaInNotch
+        case showMicIndicatorInNotch
         case preferredMusicPlayer
         case autoPauseMediaOnJoin
         case createMeetingNoteOnJoin
@@ -879,6 +929,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case shortcutStyle
         case syncReminders
         case watchScreenshots
+        case clipboardHistoryEnabled
         case focusMinutes
         case shortBreakMinutes
         case focusSoundscape
@@ -914,6 +965,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         showLiveActivityNudge = try c.decodeIfPresent(Bool.self, forKey: .showLiveActivityNudge) ?? true
         showTransientLiveActivities = try c.decodeIfPresent(Bool.self, forKey: .showTransientLiveActivities) ?? true
         showMediaInNotch = try c.decodeIfPresent(Bool.self, forKey: .showMediaInNotch) ?? true
+        showMicIndicatorInNotch = try c.decodeIfPresent(Bool.self, forKey: .showMicIndicatorInNotch) ?? true
         preferredMusicPlayer = try c.decodeIfPresent(MusicPlayerPreference.self, forKey: .preferredMusicPlayer) ?? .automatic
         autoPauseMediaOnJoin = try c.decodeIfPresent(Bool.self, forKey: .autoPauseMediaOnJoin) ?? true
         createMeetingNoteOnJoin = try c.decodeIfPresent(Bool.self, forKey: .createMeetingNoteOnJoin) ?? false
@@ -924,6 +976,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         shortcutStyle = try c.decodeIfPresent(GlobalShortcutStyle.self, forKey: .shortcutStyle) ?? .optionSpace
         syncReminders = try c.decodeIfPresent(Bool.self, forKey: .syncReminders) ?? false
         watchScreenshots = try c.decodeIfPresent(Bool.self, forKey: .watchScreenshots) ?? true
+        clipboardHistoryEnabled = try c.decodeIfPresent(Bool.self, forKey: .clipboardHistoryEnabled) ?? true
         focusMinutes = try c.decodeIfPresent(Int.self, forKey: .focusMinutes) ?? 25
         shortBreakMinutes = try c.decodeIfPresent(Int.self, forKey: .shortBreakMinutes) ?? 5
         focusSoundscape = try c.decodeIfPresent(FocusSoundscape.self, forKey: .focusSoundscape) ?? .rain

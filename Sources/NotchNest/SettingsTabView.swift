@@ -54,6 +54,7 @@ struct SettingsTabView: View {
             Toggle("Show Live Activity nudges", isOn: $model.settings.showLiveActivityNudge)
             Toggle("Show Media / Bluetooth / HUD popups", isOn: $model.settings.showTransientLiveActivities)
             Toggle("Show Now Playing in notch", isOn: $model.settings.showMediaInNotch)
+            Toggle("Show mic mute badge in notch", isOn: $model.settings.showMicIndicatorInNotch)
             Toggle("Show focus timer beside notch", isOn: $model.settings.showTimerInNotch)
             Toggle("Show next meeting in notch", isOn: $model.settings.showNextEventInNotch)
             Toggle("Hide notch in screen recordings", isOn: $model.settings.hideInScreenCapture)
@@ -134,6 +135,7 @@ struct SettingsTabView: View {
                 .foregroundStyle(.white.opacity(0.92))
 
             Toggle("Watch Desktop screenshots (Clips)", isOn: $model.settings.watchScreenshots)
+            Toggle("Track text clipboard history", isOn: $model.settings.clipboardHistoryEnabled)
             Toggle("Two-way Apple Reminders sync", isOn: Binding(
                 get: { model.settings.syncReminders },
                 set: { newValue in

@@ -27,6 +27,7 @@ let package = Package(
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("Carbon"),
                 .linkedFramework("CoreAudio"),
+                .linkedFramework("CoreImage"),
                 .linkedFramework("CoreLocation"),
                 .linkedFramework("EventKit"),
                 .linkedFramework("IOKit"),

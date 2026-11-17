@@ -110,6 +110,14 @@ public final class PersistenceStore: @unchecked Sendable {
         save(stats, to: "screen_time.json")
     }
 
+    public func loadClipboardHistory() -> [ClipboardEntry] {
+        load([ClipboardEntry].self, from: "clipboard_history.json") ?? []
+    }
+
+    public func saveClipboardHistory(_ entries: [ClipboardEntry]) {
+        save(entries, to: "clipboard_history.json")
+    }
+
     private func fileURL(for name: String) -> URL {
         baseDirectory.appendingPathComponent(name)
     }

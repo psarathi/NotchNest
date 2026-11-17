@@ -434,3 +434,172 @@ public enum NaturalLanguageTaskParser {
         return nil
     }
 }
+
+public enum WorkspaceQuickCommand: Equatable, Sendable {
+    case appendNote(String)
+    case startFocus(minutes: Int)
+    case translate(targetLanguage: String?, text: String)
+    case snapWindow(SnapZone)
+
+    public var previewLabel: String {
+        switch self {
+        case .appendNote(let text):
+            return "Command · Append to note: \(text)"
+        case .startFocus(let minutes):
+            return "Command · Start Focus timer (\(minutes)m)"
+        case .translate(let targetLanguage, let text):
+            if let targetLanguage {
+                return "Command · Translate to \(targetLanguage): \(text)"
+            }
+            return "Command · Translate: \(text)"
+        case .snapWindow(let zone):
+            return "Command · Snap window → \(zone.title)"
+        }
+    }
+
+    public static func parse(_ rawInput: String) -> WorkspaceQuickCommand? {
+        let trimmed = rawInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if let noteText = matchNoteCommand(in: trimmed) {
+            return .appendNote(noteText)
+        }
+        if let (lang, text) = matchTranslateCommand(in: trimmed) {
+            return .translate(targetLanguage: lang, text: text)
+        }
+        if let minutes = matchFocusCommand(in: trimmed) {
+            return .startFocus(minutes: minutes)
+        }
+        if let zone = matchSnapCommand(in: trimmed) {
+            return .snapWindow(zone)
+        }
+        return nil
+    }
+
+    private static func matchNoteCommand(in text: String) -> String? {
+        let nsText = text as NSString
+        guard let regex = try? NSRegularExpression(pattern: #"^(?:note|n):\s*(.+)$"#, options: [.caseInsensitive]),
+              let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: nsText.length)),
+              match.range(at: 1).location != NSNotFound else {
+            return nil
+        }
+        let body = nsText.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return body.isEmpty ? nil : body
+    }
+
+    private static func matchTranslateCommand(in text: String) -> (String?, String)? {
+        let nsText = text as NSString
+        guard let regex = try? NSRegularExpression(
+            pattern: #"^(?:tr|translate)(?:\s+([A-Za-z][A-Za-z\s-]{0,20}))?:\s*(.+)$"#,
+            options: [.caseInsensitive]
+        ),
+        let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: nsText.length)),
+        match.range(at: 2).location != NSNotFound else {
+            return nil
+        }
+
+        let body = nsText.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return nil }
+
+        var resolvedLang: String?
+        if match.range(at: 1).location != NSNotFound {
+            let rawLang = nsText.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !rawLang.isEmpty {
+                resolvedLang = normalizeLanguageName(rawLang)
+            }
+        }
+        return (resolvedLang, body)
+    }
+
+    private static func matchFocusCommand(in text: String) -> Int? {
+        let nsText = text as NSString
+        let patterns = [
+            #"^(\d{1,3})\s*(?:m|min|mins|minute|minutes)\s+focus$"#,
+            #"^focus\s+(\d{1,3})(?:\s*(?:m|min|mins|minute|minutes))?$"#
+        ]
+        for pattern in patterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+               let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: nsText.length)),
+               match.range(at: 1).location != NSNotFound {
+                let raw = nsText.substring(with: match.range(at: 1))
+                if let minutes = Int(raw), (1...180).contains(minutes) {
+                    return minutes
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func matchSnapCommand(in text: String) -> SnapZone? {
+        let nsText = text as NSString
+        guard let regex = try? NSRegularExpression(pattern: #"^snap(?::|\s+)\s*(.+)$"#, options: [.caseInsensitive]),
+              let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: nsText.length)),
+              match.range(at: 1).location != NSNotFound else {
+            return nil
+        }
+        let rawZone = nsText.substring(with: match.range(at: 1))
+            .lowercased()
+            .replacingOccurrences(of: "-", with: " ")
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        return snapAliases[rawZone]
+    }
+
+    private static let snapAliases: [String: SnapZone] = [
+        "left": .leftHalf,
+        "left half": .leftHalf,
+        "l": .leftHalf,
+        "right": .rightHalf,
+        "right half": .rightHalf,
+        "r": .rightHalf,
+        "top": .topHalf,
+        "top half": .topHalf,
+        "up": .topHalf,
+        "bottom": .bottomHalf,
+        "bottom half": .bottomHalf,
+        "down": .bottomHalf,
+        "left third": .leftThird,
+        "left 1/3": .leftThird,
+        "center third": .centerThird,
+        "middle third": .centerThird,
+        "center 1/3": .centerThird,
+        "right third": .rightThird,
+        "right 1/3": .rightThird,
+        "top left": .topLeftQuarter,
+        "top left quarter": .topLeftQuarter,
+        "tl": .topLeftQuarter,
+        "top right": .topRightQuarter,
+        "top right quarter": .topRightQuarter,
+        "tr": .topRightQuarter,
+        "bottom left": .bottomLeftQuarter,
+        "bottom left quarter": .bottomLeftQuarter,
+        "bl": .bottomLeftQuarter,
+        "bottom right": .bottomRightQuarter,
+        "bottom right quarter": .bottomRightQuarter,
+        "br": .bottomRightQuarter,
+        "max": .maximize,
+        "maximize": .maximize,
+        "full": .maximize,
+        "fullscreen": .maximize,
+        "center": .center,
+        "c": .center
+    ]
+
+    private static func normalizeLanguageName(_ raw: String) -> String {
+        switch raw.lowercased() {
+        case "es", "spa", "spanish": return "Spanish"
+        case "fr", "fra", "fre", "french": return "French"
+        case "de", "deu", "ger", "german": return "German"
+        case "ja", "jp", "jpn", "japanese": return "Japanese"
+        case "zh", "cn", "zho", "chi", "chinese": return "Chinese"
+        case "ko", "kr", "kor", "korean": return "Korean"
+        case "hi", "hin", "hindi": return "Hindi"
+        case "pt", "por", "portuguese": return "Portuguese"
+        case "it", "ita", "italian": return "Italian"
+        case "en", "eng", "english": return "English"
+        default:
+            return raw.capitalized
+        }
+    }
+}
