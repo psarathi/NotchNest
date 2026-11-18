@@ -27,9 +27,10 @@ struct TodayTabView: View {
     @State private var editReminderLeadMinutes: Int?
     @State private var dictationTarget: WorkspaceDictationTarget?
     @State private var notepadFeedback: String?
+    @State private var notepadController = RichTextEditorController()
 
     @FocusState private var isAddingFocused: Bool
-    @FocusState private var isNotepadFocused: Bool
+    @State private var isNotepadFocused: Bool = false
 
     private static let dateHeaderFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -1047,6 +1048,7 @@ struct TodayTabView: View {
                         model.addNote()
                         onRequestFocus()
                         isNotepadFocused = true
+                        notepadController.focus()
                     } label: {
                         Label("New Note", systemImage: "plus")
                     }
@@ -1077,8 +1079,7 @@ struct TodayTabView: View {
                             }
                         }
                         Button("Copy Note") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(note.body, forType: .string)
+                            model.copyNoteToPasteboard(note)
                         }
                         Divider()
                     }
@@ -1086,6 +1087,7 @@ struct TodayTabView: View {
                         model.addNote()
                         onRequestFocus()
                         isNotepadFocused = true
+                        notepadController.focus()
                     }
                     Button("Open Notes Library") {
                         model.activeTab = .notes
@@ -1110,10 +1112,11 @@ struct TodayTabView: View {
                     .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(NotchTheme.yellowMuted)
 
-                if let notepadFeedback {
-                    Text(notepadFeedback)
+                if let feedback = notepadFeedback ?? model.autoConvertedNoteBanner {
+                    Text(feedback)
                         .font(.system(size: 9.5, weight: .semibold))
                         .foregroundStyle(NotchTheme.yellowInk)
+                        .lineLimit(1)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
                         .background(NotchTheme.yellowPillFill, in: Capsule())
@@ -1122,42 +1125,54 @@ struct TodayTabView: View {
 
             ZStack(alignment: .topLeading) {
                 if noteBody.isEmpty {
-                    Text("Capture quick thoughts, meeting notes, or ideas…")
+                    Text("Notes, bullets (- ), or '! ' / '[] ' for auto-todos…")
                         .font(.system(size: 11.5))
                         .foregroundStyle(NotchTheme.yellowMuted.opacity(0.65))
-                        .padding(.top, 5)
-                        .padding(.leading, 4)
+                        .padding(.top, 4)
+                        .padding(.leading, 5)
                         .allowsHitTesting(false)
                 }
 
                 if let note {
-                    TextEditor(
-                        text: Binding(
-                            get: {
-                                if let idx = model.notes.firstIndex(where: { $0.id == note.id }) {
-                                    return model.notes[idx].body
-                                }
-                                return ""
-                            },
-                            set: { newValue in
-                                model.updateNoteBody(note.id, body: newValue)
-                            }
-                        )
+                    RichTextNoteView(
+                        noteID: note.id,
+                        plainText: note.body,
+                        rtfData: note.rtfData,
+                        inkColor: NotchTheme.yellowInkNS,
+                        baseFontSize: 11.5,
+                        controller: notepadController,
+                        onRequestFocus: {
+                            onRequestFocus()
+                            isAddingFocused = false
+                        },
+                        onFocusChange: { focused in
+                            isNotepadFocused = focused
+                        },
+                        onContentChange: { newPlain, newRTF, commitLastLine in
+                            model.updateNoteBody(
+                                note.id,
+                                body: newPlain,
+                                rtfData: newRTF,
+                                commitTodoPrefixes: commitLastLine
+                            )
+                        }
                     )
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(NotchTheme.yellowInk)
-                    .tint(NotchTheme.yellowInk)
-                    .scrollContentBackground(.hidden)
-                    .colorScheme(.light)
-                    .focused($isNotepadFocused)
-                    .onTapGesture {
-                        onRequestFocus()
-                        isAddingFocused = false
-                        isNotepadFocused = true
-                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            RichTextFormatBar(
+                controller: notepadController,
+                inkColor: NotchTheme.yellowInk,
+                mutedColor: NotchTheme.yellowMuted,
+                activePillColor: NotchTheme.yellowPillFill,
+                compact: true,
+                onActionComplete: {
+                    onRequestFocus()
+                    notepadController.focus()
+                }
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             dottedSeparator
 

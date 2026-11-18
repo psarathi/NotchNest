@@ -1279,4 +1279,89 @@ struct NotchNestCoreTests {
         #expect(model.activeLiveNudgeTask(at: t0.addingTimeInterval(300))?.title == "Submit report")
         #expect(model.showsLiveActivityPill(at: t0.addingTimeInterval(300)) == true)
     }
+
+    @Test("Notepad auto-todo prefixes extract tasks on Enter/commit without hijacking bullets and preserve RTF formatting")
+    @MainActor
+    func notepadAutoTodoExtractionAndRichTextRTFPersistence() throws {
+        // Mid-line typing without newline or commit must NOT trigger premature conversion
+        let typing = NoteTodoPrefixExtractor.extract(from: "[] Buy coffee", commitLastLine: false)
+        #expect(typing.extractedItems.isEmpty)
+        #expect(typing.updatedBody == "[] Buy coffee")
+
+        // Bullets, headings, and already-converted lines stay untouched; prefixed lines convert
+        let sample = """
+        # Sprint Notes
+        - Regular dash bullet
+        • Rich dot bullet
+        * Star bullet
+        ! Pay internet bill 25m #Home
+        !! Fix prod crash
+        [ ] Book flights
+        • [] Email Alex
+        todo: Renew passport
+        [✓] Already converted
+        """
+        let extracted = NoteTodoPrefixExtractor.extract(from: sample, commitLastLine: true)
+        #expect(extracted.extractedItems.count == 5)
+        #expect(extracted.extractedItems[0] == NoteAutoTodoItem(taskInput: "Pay internet bill 25m #Home", priority: .normal))
+        #expect(extracted.extractedItems[1] == NoteAutoTodoItem(taskInput: "Fix prod crash", priority: .high))
+        #expect(extracted.extractedItems[2] == NoteAutoTodoItem(taskInput: "Book flights", priority: .normal))
+        #expect(extracted.extractedItems[3] == NoteAutoTodoItem(taskInput: "Email Alex", priority: .normal))
+        #expect(extracted.extractedItems[4] == NoteAutoTodoItem(taskInput: "Renew passport", priority: .normal))
+        #expect(extracted.updatedBody.contains("- Regular dash bullet"))
+        #expect(extracted.updatedBody.contains("• Rich dot bullet"))
+        #expect(extracted.updatedBody.contains("• [✓] Email Alex"))
+
+        // Full model integration + RTF formatting survival across conversion & reload
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NotchNestNoteRTFTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let model = NotchNestModel(persistence: PersistenceStore(baseDirectory: tempDir), enableSystemIntegrations: false)
+        defer { model.shutdown() }
+        let noteID = model.selectedNoteID
+
+        let attr = NSMutableAttributedString(
+            string: "• Keep bullet\n!! Call bank 15m #Finance\n",
+            attributes: [.font: NSFont.systemFont(ofSize: 12)]
+        )
+        let boldRange = (attr.string as NSString).range(of: "Call bank")
+        attr.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: 12), range: boldRange)
+        let rtfData = try attr.data(
+            from: NSRange(location: 0, length: attr.length),
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
+        )
+
+        let addedCount = model.updateNoteBody(noteID, body: attr.string, rtfData: rtfData)
+        #expect(addedCount == 1)
+
+        // Created high-priority task with parsed duration & project tag
+        let createdTask = model.tasks.first(where: { $0.title == "Call bank" })
+        #expect(createdTask?.priority == .high)
+        #expect(createdTask?.targetMinutes == 15)
+        #expect(createdTask?.projectTag == "Finance")
+
+        // Prefix rewritten to [✓] while bold RTF trait on "Call bank" is preserved
+        let updatedNote = model.notes.first(where: { $0.id == noteID })!
+        #expect(updatedNote.body.contains("[✓] Call bank 15m #Finance"))
+        let savedRTF = try #require(updatedNote.rtfData)
+        let hydrated = try #require(NSAttributedString(rtf: savedRTF, documentAttributes: nil))
+        let hydratedRange = (hydrated.string as NSString).range(of: "Call bank")
+        let fontAfter = hydrated.attribute(.font, at: hydratedRange.location, effectiveRange: nil) as? NSFont
+        #expect(fontAfter?.fontDescriptor.symbolicTraits.contains(.bold) == true)
+
+        // Manual batch "To Tasks" skips already-converted [✓] lines and extracts remaining bullet
+        #expect(model.convertNoteLinesToTasks(noteID) == 1)
+        #expect(model.tasks.contains(where: { $0.title == "Keep bullet" }))
+
+        // Reload from persistence keeps rtfData + backward-compatible decode
+        let reloaded = NotchNestModel(persistence: PersistenceStore(baseDirectory: tempDir), enableSystemIntegrations: false)
+        defer { reloaded.shutdown() }
+        #expect(reloaded.notes.first(where: { $0.id == noteID })?.rtfData != nil)
+        let legacyNote = try JSONDecoder().decode(
+            NoteEntry.self,
+            from: Data(#"{"id":"00000000-0000-0000-0000-000000000001","title":"Old","body":"plain","updatedAt":0}"#.utf8)
+        )
+        #expect(legacyNote.rtfData == nil)
+    }
 }

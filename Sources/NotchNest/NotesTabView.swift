@@ -6,8 +6,9 @@ struct NotesTabView: View {
     @Bindable var model: NotchNestModel
     let onRequestFocus: () -> Void
 
-    @FocusState private var editorFocused: Bool
+    @State private var editorFocused = false
     @State private var convertedBanner: String?
+    @State private var noteController = RichTextEditorController()
 
     var body: some View {
         HStack(spacing: 10) {
@@ -30,6 +31,7 @@ struct NotesTabView: View {
                     model.addNote()
                     onRequestFocus()
                     editorFocused = true
+                    noteController.focus()
                 } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 11, weight: .bold))
@@ -89,10 +91,11 @@ struct NotesTabView: View {
 
                     Spacer()
 
-                    if let convertedBanner {
-                        Text(convertedBanner)
+                    if let banner = convertedBanner ?? model.autoConvertedNoteBanner {
+                        Text(banner)
                             .font(.system(size: 10.5, weight: .medium))
                             .foregroundStyle(NotchTheme.sagePaper)
+                            .lineLimit(1)
                     } else {
                         Text("\(note.body.count) chars")
                             .font(.system(size: 10.5))
@@ -120,8 +123,7 @@ struct NotesTabView: View {
                     .help("Create Today tasks from lines in this note")
 
                     Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(note.body, forType: .string)
+                        model.copyNoteToPasteboard(note)
                     } label: {
                         Image(systemName: "doc.on.doc")
                             .font(.system(size: 11))
@@ -143,24 +145,61 @@ struct NotesTabView: View {
                     }
                 }
 
-                TextEditor(
-                    text: Binding(
-                        get: { model.notes.indices.contains(index) ? model.notes[index].body : "" },
-                        set: { newValue in
-                            model.updateNoteBody(note.id, body: newValue)
+                HStack(spacing: 8) {
+                    RichTextFormatBar(
+                        controller: noteController,
+                        inkColor: .white,
+                        mutedColor: .white.opacity(0.65),
+                        activePillColor: NotchTheme.sagePaper.opacity(0.28),
+                        compact: false,
+                        onActionComplete: {
+                            onRequestFocus()
+                            noteController.focus()
                         }
                     )
-                )
-                .font(.system(size: 12.5))
-                .foregroundStyle(.white)
-                .scrollContentBackground(.hidden)
-                .padding(8)
-                .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
-                .focused($editorFocused)
-                .onTapGesture {
-                    onRequestFocus()
-                    editorFocused = true
+                    Spacer(minLength: 4)
+                    Text("! or [] + ↵ → auto todo")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.42))
+                        .lineLimit(1)
                 }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 8))
+
+                ZStack(alignment: .topLeading) {
+                    if note.body.isEmpty {
+                        Text("Write notes with bullets (- ), bold (⌘B), headings, or prefix lines with '! ' or '[] ' to auto-create todos…")
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(.white.opacity(0.32))
+                            .padding(.top, 12)
+                            .padding(.leading, 12)
+                            .allowsHitTesting(false)
+                    }
+
+                    RichTextNoteView(
+                        noteID: note.id,
+                        plainText: note.body,
+                        rtfData: note.rtfData,
+                        inkColor: .white,
+                        baseFontSize: 12.5,
+                        controller: noteController,
+                        onRequestFocus: onRequestFocus,
+                        onFocusChange: { focused in
+                            editorFocused = focused
+                        },
+                        onContentChange: { newPlain, newRTF, commitLastLine in
+                            model.updateNoteBody(
+                                note.id,
+                                body: newPlain,
+                                rtfData: newRTF,
+                                commitTodoPrefixes: commitLastLine
+                            )
+                        }
+                    )
+                    .padding(6)
+                }
+                .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
             }
             .padding(11)
             .background(NotchTheme.cardSurface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))

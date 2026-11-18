@@ -718,3 +718,128 @@ public enum WorkspaceQuickCommand: Equatable, Sendable {
         }
     }
 }
+
+public struct NoteAutoTodoItem: Equatable, Sendable {
+    public var taskInput: String
+    public var priority: TaskPriority
+
+    public init(taskInput: String, priority: TaskPriority = .normal) {
+        self.taskInput = taskInput
+        self.priority = priority
+    }
+}
+
+public struct NotePrefixReplacement: Equatable, Sendable {
+    public var location: Int
+    public var length: Int
+    public var replacement: String
+}
+
+public struct NoteAutoTodoExtractionResult: Equatable, Sendable {
+    public var updatedBody: String
+    public var extractedItems: [NoteAutoTodoItem]
+    public var replacements: [NotePrefixReplacement]
+}
+
+/// Detects special-character todo prefixes (`! `, `!! `, `[] `, `[ ] `, `☐ `, `todo: `, `/todo `, `@todo `)
+/// on completed note lines (terminated by newline, or all lines on blur commit) without hijacking normal bullets.
+public enum NoteTodoPrefixExtractor {
+    public static func extract(from body: String, commitLastLine: Bool = false) -> NoteAutoTodoExtractionResult {
+        guard !body.isEmpty else {
+            return NoteAutoTodoExtractionResult(updatedBody: body, extractedItems: [], replacements: [])
+        }
+
+        let nsBody = body as NSString
+        var lineRanges: [NSRange] = []
+        var cursor = 0
+        while cursor <= nsBody.length {
+            let searchRange = NSRange(location: cursor, length: nsBody.length - cursor)
+            let newlineRange = nsBody.range(of: "\n", options: [], range: searchRange)
+            if newlineRange.location == NSNotFound {
+                lineRanges.append(NSRange(location: cursor, length: nsBody.length - cursor))
+                break
+            } else {
+                lineRanges.append(NSRange(location: cursor, length: newlineRange.location - cursor))
+                cursor = newlineRange.location + newlineRange.length
+                if cursor == nsBody.length {
+                    // Trailing newline leaves an empty final slot; only lines before it are completed.
+                    lineRanges.append(NSRange(location: cursor, length: 0))
+                    break
+                }
+            }
+        }
+
+        let lastProcessable = commitLastLine ? (lineRanges.count - 1) : (lineRanges.count - 2)
+        guard lastProcessable >= 0 else {
+            return NoteAutoTodoExtractionResult(updatedBody: body, extractedItems: [], replacements: [])
+        }
+
+        var items: [NoteAutoTodoItem] = []
+        var replacements: [NotePrefixReplacement] = []
+
+        for idx in 0...lastProcessable {
+            let lineRange = lineRanges[idx]
+            guard lineRange.length > 0 else { continue }
+            let rawLine = nsBody.substring(with: lineRange)
+            if let match = matchTodoPrefix(in: rawLine) {
+                replacements.append(
+                    NotePrefixReplacement(
+                        location: lineRange.location + match.prefixLocalRange.location,
+                        length: match.prefixLocalRange.length,
+                        replacement: "[✓] "
+                    )
+                )
+                items.append(NoteAutoTodoItem(taskInput: match.taskInput, priority: match.priority))
+            }
+        }
+
+        guard !replacements.isEmpty else {
+            return NoteAutoTodoExtractionResult(updatedBody: body, extractedItems: [], replacements: [])
+        }
+
+        let mutable = NSMutableString(string: body)
+        for rep in replacements.reversed() {
+            mutable.replaceCharacters(in: NSRange(location: rep.location, length: rep.length), with: rep.replacement)
+        }
+
+        return NoteAutoTodoExtractionResult(
+            updatedBody: mutable as String,
+            extractedItems: items,
+            replacements: replacements
+        )
+    }
+
+    private struct LocalPrefixMatch {
+        let prefixLocalRange: NSRange
+        let taskInput: String
+        let priority: TaskPriority
+    }
+
+    private static func matchTodoPrefix(in rawLine: String) -> LocalPrefixMatch? {
+        let nsLine = rawLine as NSString
+        // Skip optional leading indentation and an optional rich bullet marker ("• "), keeping markdown `-`/`*` free.
+        let pattern = #"^[ \t]*(?:•[ \t]+)?(\!\![ \t]+|\![ \t]+|\[\s?\][ \t]*|☐[ \t]*|(?:todo:|/todo|@todo)[ \t]+)(.+)$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let match = regex.firstMatch(in: rawLine, range: NSRange(location: 0, length: nsLine.length)),
+              match.range(at: 1).location != NSNotFound,
+              match.range(at: 2).location != NSNotFound else {
+            return nil
+        }
+
+        let prefixToken = nsLine.substring(with: match.range(at: 1))
+        let taskBody = nsLine.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !taskBody.isEmpty else { return nil }
+
+        // Avoid re-converting anything already checked like [x] or [✓] (excluded by regex, double-checked here).
+        if taskBody.hasPrefix("[✓]") || taskBody.hasPrefix("[x]") || taskBody.hasPrefix("[X]") {
+            return nil
+        }
+
+        let isHigh = prefixToken.trimmingCharacters(in: .whitespaces).hasPrefix("!!")
+        return LocalPrefixMatch(
+            prefixLocalRange: match.range(at: 1),
+            taskInput: taskBody,
+            priority: isHigh ? .high : .normal
+        )
+    }
+}

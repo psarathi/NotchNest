@@ -47,6 +47,7 @@ public final class NotchNestModel {
     public var isDraggingFileOverNotch = false
     public var pendingActionURLs: [URL] = []
     public var dropActionFeedback: String?
+    public var autoConvertedNoteBanner: String?
     public var transientLiveActivity: TransientLiveActivity?
     public var workspaceFocusRequestNonce: Int = 0
     public var pendingWorkspaceTypedSeed: String = ""
@@ -81,6 +82,7 @@ public final class NotchNestModel {
     private var scrollGestureRecognizer = NotchScrollGestureRecognizer()
     private var lastWeatherRefreshAt: Date?
     private var transientDismissTask: Task<Void, Never>?
+    private var autoConvertedBannerTask: Task<Void, Never>?
     @ObservationIgnored private nonisolated(unsafe) var screenUnlockObserver: NSObjectProtocol?
 
     public var onRequestPanelToggle: (() -> Void)?
@@ -1314,17 +1316,83 @@ public final class NotchNestModel {
         return chosen
     }
 
-    public func updateNoteBody(_ id: UUID, body: String) {
-        guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
-        notes[idx].body = body
+    @discardableResult
+    public func updateNoteBody(
+        _ id: UUID,
+        body: String,
+        rtfData: Data? = nil,
+        commitTodoPrefixes: Bool = false
+    ) -> Int {
+        guard let idx = notes.firstIndex(where: { $0.id == id }) else { return 0 }
+
+        let extraction = NoteTodoPrefixExtractor.extract(from: body, commitLastLine: commitTodoPrefixes)
+        let finalBody: String
+        let finalRTF: Data?
+
+        if extraction.replacements.isEmpty {
+            finalBody = body
+            finalRTF = rtfData
+        } else {
+            finalBody = extraction.updatedBody
+            if let rtfData,
+               let mutable = NSMutableAttributedString(rtf: rtfData, documentAttributes: nil) {
+                for rep in extraction.replacements.reversed() {
+                    let nsRange = NSRange(location: rep.location, length: rep.length)
+                    if nsRange.location >= 0, nsRange.location + nsRange.length <= mutable.length {
+                        mutable.replaceCharacters(in: nsRange, with: rep.replacement)
+                    }
+                }
+                finalRTF = try? mutable.data(
+                    from: NSRange(location: 0, length: mutable.length),
+                    documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
+                )
+            } else {
+                finalRTF = nil
+            }
+        }
+
+        notes[idx].body = finalBody
+        notes[idx].rtfData = finalRTF
         notes[idx].updatedAt = Date()
         if notes[idx].title.hasPrefix("Scratchpad") || notes[idx].title.hasPrefix("Daily") || notes[idx].title.hasPrefix("Note ") {
-            let firstLine = body.split(separator: "\n").first.map(String.init)?.trimmingCharacters(in: .whitespaces)
+            let firstLine = finalBody.split(separator: "\n").first.map(String.init)?.trimmingCharacters(in: .whitespaces)
             if let firstLine, !firstLine.isEmpty {
                 notes[idx].title = String(firstLine.prefix(24))
             }
         }
         persistence.saveNotes(notes)
+
+        let extractedCount = extraction.extractedItems.count
+        if extractedCount > 0 {
+            let noteDayKey = notes[idx].dailyDayKey ?? dayKey(forDayOffset: 0) ?? DailyFocusStats.todayKey()
+            let defaultBucket: TaskBucket
+            if let dayDate = DailyFocusStats.date(fromDayKey: noteDayKey),
+               Calendar.current.isDateInTomorrow(dayDate) {
+                defaultBucket = .tomorrow
+            } else {
+                defaultBucket = .today
+            }
+            for item in extraction.extractedItems {
+                addParsedTask(
+                    item.taskInput,
+                    defaultBucket: defaultBucket,
+                    defaultDayKey: noteDayKey,
+                    priorityOverride: item.priority
+                )
+            }
+
+            let summary = extractedCount == 1
+                ? "+Todo: \(extraction.extractedItems[0].taskInput)"
+                : "+\(extractedCount) todos added"
+            autoConvertedNoteBanner = summary
+            autoConvertedBannerTask?.cancel()
+            autoConvertedBannerTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(2.4))
+                guard !Task.isCancelled else { return }
+                self?.autoConvertedNoteBanner = nil
+            }
+        }
+        return extractedCount
     }
 
     public func appendToActiveNote(_ rawText: String) {
@@ -1342,15 +1410,25 @@ public final class NotchNestModel {
         let idx = notes.firstIndex(where: { $0.id == selectedNoteID }) ?? 0
         selectedNoteID = notes[idx].id
         let existing = notes[idx].body
-        let appended: String
-        if existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            appended = trimmed
-        } else if existing.hasSuffix("\n") {
-            appended = existing + trimmed
-        } else {
-            appended = existing + "\n" + trimmed
+        let separator = existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? ""
+            : (existing.hasSuffix("\n") ? "" : "\n")
+        let appended = existing + separator + trimmed
+
+        var appendedRTF: Data? = nil
+        if let existingRTF = notes[idx].rtfData,
+           let mutable = NSMutableAttributedString(rtf: existingRTF, documentAttributes: nil) {
+            let suffix = separator + trimmed
+            let baseAttrs: [NSAttributedString.Key: Any] = mutable.length > 0
+                ? mutable.attributes(at: max(0, mutable.length - 1), effectiveRange: nil)
+                : [.font: NSFont.systemFont(ofSize: 12)]
+            mutable.append(NSAttributedString(string: suffix, attributes: baseAttrs))
+            appendedRTF = try? mutable.data(
+                from: NSRange(location: 0, length: mutable.length),
+                documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
+            )
         }
-        updateNoteBody(notes[idx].id, body: appended)
+        updateNoteBody(notes[idx].id, body: appended, rtfData: appendedRTF)
     }
 
     public func sendToTranslator(
@@ -1705,12 +1783,20 @@ public final class NotchNestModel {
         guard let note = notes.first(where: { $0.id == id }) else { return 0 }
         let lines = note.body
             .components(separatedBy: .newlines)
-            .map { line in
-                line.trimmingCharacters(in: .whitespacesAndNewlines)
-                    .replacingOccurrences(of: #"^(?:[-*•]|\[\s*\]|\d+\.)\s+"#, with: "", options: .regularExpression)
+            .compactMap { rawLine -> String? in
+                let trimmed = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty,
+                      !trimmed.hasPrefix("[✓]"),
+                      !trimmed.hasPrefix("☑"),
+                      !trimmed.hasPrefix("[x]"),
+                      !trimmed.hasPrefix("[X]") else {
+                    return nil
+                }
+                let cleaned = trimmed
+                    .replacingOccurrences(of: #"^(?:[-*•]|!!?|\[[\s]?\]|☐|todo:|/todo|@todo|\d+\.)\s+"#, with: "", options: [.regularExpression, .caseInsensitive])
                     .trimmingCharacters(in: .whitespacesAndNewlines)
+                return cleaned.isEmpty ? nil : cleaned
             }
-            .filter { !$0.isEmpty }
 
         guard !lines.isEmpty else { return 0 }
         for line in lines.reversed() {
@@ -1729,6 +1815,18 @@ public final class NotchNestModel {
             selectedNoteID = notes[0].id
         }
         persistence.saveNotes(notes)
+    }
+
+    public func copyNoteToPasteboard(_ note: NoteEntry) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        if let rtfData = note.rtfData {
+            pasteboard.declareTypes([.rtf, .string], owner: nil)
+            pasteboard.setData(rtfData, forType: .rtf)
+            pasteboard.setString(note.body, forType: .string)
+        } else {
+            pasteboard.setString(note.body, forType: .string)
+        }
     }
 
     // MARK: - Clips

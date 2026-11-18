@@ -32,6 +32,7 @@ enum NotchTheme {
     // Workspace matte warm sand/yellow Notepad palette
     static let yellowPaper = Color(red: 0.824, green: 0.761, blue: 0.545)
     static let yellowInk = Color(red: 0.135, green: 0.118, blue: 0.072)
+    static let yellowInkNS = NSColor(srgbRed: 0.135, green: 0.118, blue: 0.072, alpha: 1.0)
     static let yellowMuted = Color(red: 0.36, green: 0.32, blue: 0.21)
     static let yellowPillFill = Color.black.opacity(0.07)
 

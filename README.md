@@ -16,7 +16,7 @@ An original, clean-room **Universal (`arm64` Apple Silicon + `x86_64` Intel) nat
 - **Workspace (4-Column Matte Bento)**:
   - **Today's Tasks (Sage Green)**: Daily/date-navigable task list with `Sort` (`Default`, `Priority`, `Due Time`, `Duration`), per-task target countdown durations (`45m`), natural-language task parsing (`Prep slides 45m tomorrow 5pm #Work`), universal quick commands (`note:`, `25m focus`, `tr es:`, `snap left`), voice dictation, and optional Apple Reminders sync.
   - **Focus Countdown (Pastel Lavender)**: Dedicated Workspace countdown card with task dropdown selector, crisp dot-matrix digital clock (`45:00`), `Start`/`Pause`, task completion `✓`, `Set time` presets, and Focus soundscape control.
-  - **Notepad (Warm Yellow)**: Inline editable scratchpad right inside Workspace with word counter, note switcher, voice dictation, and line-to-task extraction.
+  - **Notepad (Warm Yellow)**: Rich-text inline scratchpad right inside Workspace (`Bold` `⌘B`, `Italic` `⌘I`, `Underline` `⌘U`, strikethrough, headings, `- `/`• ` bullets, numbered lists, `RTF` persistence), word counter, note switcher, voice dictation, line-to-task extraction, and automatic special-prefix Todo creation (`! `, `!! `, `[] `, `[ ] `, `todo: `, `/todo `, `@todo ` + Enter).
   - **Calendar (Misty Steel-Blue)**: 7-day selector, relative meeting countdowns (`In 1 hr 18 min`), one-click Zoom/Meet/Teams/Webex launch, camera check, and meeting note prep.
 - **Week Planner**: Horizontally scrollable 9-column Kanban (`Inbox`, 7 upcoming days, `Later`) with day-specific scheduling and inline task editing.
 - **Hub (`⌘3`)**:
@@ -27,7 +27,7 @@ An original, clean-room **Universal (`arm64` Apple Silicon + `x86_64` Intel) nat
   - **Window Snap Zones**: Accessibility (`AXUIElement`) window snapping (`Halves`, `Thirds`, `Quarters`, `Maximize`, `Center 70%`) plus optional drag-to-top-edge snapping.
 - **Focus & Ambient Soundscapes**: Drift-free Pomodoro timer with synthesized procedural soundscapes (`Rain`, `Brown Noise`, `Ocean`, `Cafe`) via `AVAudioEngine`.
 - **Clips, Clipboard History & QR Tray**: Watches your macOS screenshot folder, supports direct file drop actions (`Shelf`, `Copy Text (OCR)` via Apple `Vision`, `Compress`, `AirDrop`, `Zip`, `To PNG`, `To JPG`, `Finder`, `Trash`, `Eject`), and keeps a searchable text/URL clipboard ring (filtering password managers & concealed types) with Pin, Open URL, Translate, and offline QR code sharing.
-- **Notes, Mirror & Insights**: Persistent multi-note scratchpad with one-click task extraction, on-demand pre-call `AVFoundation` camera mirror, and 7-day completion/focus analytics.
+- **Notes, Mirror & Insights**: Rich-text multi-note scratchpad (`B`/`I`/`U`/`S`/`H`/`</>`, smart bullet & numbered lists, and `! ` / `[] ` auto-todo extraction) with one-click task extraction, on-demand pre-call `AVFoundation` camera mirror, and 7-day completion/focus analytics.
 - **Shortcuts & Privacy**: `⌥Space` / `⌥N` global toggle, `⌥M` mic mute inside NotchNest, `⌘1`–`⌘6` tabs, `⌘,` Settings, `⌥S` snooze, `Esc` close, `⌘Q` quit, plus `NSWindow.SharingType.none` capture hiding.
 
 ## Build & Run
