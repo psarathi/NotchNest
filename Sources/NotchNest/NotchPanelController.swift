@@ -156,6 +156,7 @@ final class NotchPanelController {
     private var lastExternalApp: NSRunningApplication?
     private var isTrackingMenu = false
     private var menuActionSelected = false
+    private var lastLiveActivityPillState = false
 
     init(model: NotchNestModel) {
         self.model = model
@@ -421,14 +422,15 @@ final class NotchPanelController {
     }
 
     private func updateHitRect() {
+        let nowLive = model.showsLiveActivityPill
         let rect = layout.activeHitRectInPanel(
             isExpanded: model.isExpanded,
-            isLiveActivity: model.showsLiveActivityPill
+            isLiveActivity: nowLive
         )
         containerView.activeHitRect = rect
         if model.isExpanded {
             containerView.hoverTriggerRect = rect
-        } else if model.showsLiveActivityPill {
+        } else if nowLive {
             containerView.hoverTriggerRect = rect.insetBy(dx: 8, dy: 4)
         } else {
             // Trim outer ear flares and bottom 3pt border so cursor must genuinely sit over the pill
@@ -439,6 +441,10 @@ final class NotchPanelController {
                 height: max(20, rect.height - 3)
             )
         }
+        if nowLive && !lastLiveActivityPillState && !model.isExpanded {
+            panel.orderFrontRegardless()
+        }
+        lastLiveActivityPillState = nowLive
     }
 
     private func isPointerInsideHoverTriggerRect() -> Bool {

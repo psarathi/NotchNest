@@ -36,6 +36,7 @@ public final class NotchNestModel {
     public var taskRemainingSeconds: [UUID: TimeInterval] = [:]
     public var microTimers: [MicroTimerItem] = []
     public var focusGuardSnoozedUntil: Date?
+    public var nudgeClockRevision: Int = 0
     public var autoTriggeredReminderTaskIDs: Set<UUID> = []
     public var activeCountdownSourceIsReminder = false
     public var pinnedLiveActivityTaskID: UUID?
@@ -73,7 +74,9 @@ public final class NotchNestModel {
     private var lastObservedTimerState: TimerRunState = .idle
     private var lastEnsuredDailyNoteKey: String = ""
     private var nudgeRefreshTimer: Timer?
+    private var nudgeWakeTimer: Timer?
     private var microTimerTickTimer: Timer?
+    private let enableSystemIntegrationsFlag: Bool
     private var focusGuardLastNudgeByBundle: [String: Date] = [:]
     private var scrollGestureRecognizer = NotchScrollGestureRecognizer()
     private var lastWeatherRefreshAt: Date?
@@ -88,6 +91,7 @@ public final class NotchNestModel {
 
     public init(persistence: PersistenceStore = PersistenceStore(), enableSystemIntegrations: Bool = true) {
         self.persistence = persistence
+        self.enableSystemIntegrationsFlag = enableSystemIntegrations
         let loadedSettings = persistence.loadSettings()
         self.settings = loadedSettings
         self.tasks = persistence.loadTasks()
@@ -323,7 +327,11 @@ public final class NotchNestModel {
     // MARK: - Live Activity Nudge State
 
     public var activeLiveNudgeTask: TaskItem? {
-        let now = Date()
+        _ = nudgeClockRevision
+        return activeLiveNudgeTask(at: Date())
+    }
+
+    public func activeLiveNudgeTask(at now: Date) -> TaskItem? {
         if let pinnedID = pinnedLiveActivityTaskID,
            let pinned = tasks.first(where: { $0.id == pinnedID && !$0.isCompleted }) {
             if let snoozed = pinned.snoozedUntil, snoozed > now {
@@ -344,8 +352,12 @@ public final class NotchNestModel {
     }
 
     public var activeLiveNudgeEvent: CalendarEventItem? {
-        let now = Date()
-        return eventKit.upcomingEvents.first { event in
+        _ = nudgeClockRevision
+        return activeLiveNudgeEvent(at: Date())
+    }
+
+    public func activeLiveNudgeEvent(at now: Date) -> CalendarEventItem? {
+        eventKit.upcomingEvents.first { event in
             guard !event.isAllDay, !dismissedEventIDs.contains(event.id) else { return false }
             let leadMinutes = Double(max(10, (event.travelTimeMinutes ?? 0) + 10)) * 60
             let delta = event.startDate.timeIntervalSince(now)
@@ -354,9 +366,14 @@ public final class NotchNestModel {
     }
 
     public var showsLiveActivityPill: Bool {
+        _ = nudgeClockRevision
+        return showsLiveActivityPill(at: Date())
+    }
+
+    public func showsLiveActivityPill(at now: Date) -> Bool {
         healthService.isEyeBreakDue
             || transientLiveActivity != nil
-            || (settings.showLiveActivityNudge && (activeLiveNudgeTask != nil || activeLiveNudgeEvent != nil))
+            || (settings.showLiveActivityNudge && (activeLiveNudgeTask(at: now) != nil || activeLiveNudgeEvent(at: now) != nil))
     }
 
     // MARK: - Insights Computed Metrics
@@ -482,7 +499,9 @@ public final class NotchNestModel {
         tasks.insert(item, at: 0)
         sortAndSaveTasks()
         evaluatePreDueReminders()
+        nudgeClockRevision &+= 1
         onHitRectNeedsUpdate?()
+        scheduleNextNudgeWakeup()
     }
 
     public func addParsedTask(
@@ -537,7 +556,9 @@ public final class NotchNestModel {
             tasks[idx].reminderIdentifier = eventKit.upsertReminder(for: tasks[idx])
         }
         sortAndSaveTasks()
+        nudgeClockRevision &+= 1
         onHitRectNeedsUpdate?()
+        scheduleNextNudgeWakeup()
     }
 
     public func toggleTaskPriority(_ id: UUID) {
@@ -618,14 +639,18 @@ public final class NotchNestModel {
         }
         sortAndSaveTasks()
         evaluatePreDueReminders()
+        nudgeClockRevision &+= 1
         onHitRectNeedsUpdate?()
+        scheduleNextNudgeWakeup()
     }
 
     public func moveTask(_ id: UUID, to bucket: TaskBucket) {
         guard let idx = tasks.firstIndex(where: { $0.id == id }) else { return }
         applyBucketTransition(at: idx, to: bucket)
         sortAndSaveTasks()
+        nudgeClockRevision &+= 1
         onHitRectNeedsUpdate?()
+        scheduleNextNudgeWakeup()
     }
 
     public func moveTask(_ id: UUID, toColumn column: WeekPlanColumn, calendar: Calendar = .current) {
@@ -647,7 +672,9 @@ public final class NotchNestModel {
             tasks[idx].dueDate = nil
         }
         sortAndSaveTasks()
+        nudgeClockRevision &+= 1
         onHitRectNeedsUpdate?()
+        scheduleNextNudgeWakeup()
     }
 
     private func applyBucketTransition(at idx: Int, to bucket: TaskBucket) {
@@ -690,32 +717,136 @@ public final class NotchNestModel {
         }
         pinnedLiveActivityTaskID = (pinnedLiveActivityTaskID == id) ? nil : id
         persistence.saveTasks(tasks)
+        nudgeClockRevision &+= 1
         onHitRectNeedsUpdate?()
+        scheduleNextNudgeWakeup()
     }
 
-    public func snoozeActiveNudge(minutes: Int = 5) {
+    public func snoozeActiveNudge(minutes: Int = 5, now: Date = Date()) {
         if healthService.isEyeBreakDue {
             healthService.snoozeEyeBreak(minutes: minutes)
+            nudgeClockRevision &+= 1
             onHitRectNeedsUpdate?()
             return
         }
-        let snoozeDate = Date().addingTimeInterval(TimeInterval(minutes * 60))
-        if let task = activeLiveNudgeTask,
+        let snoozeDate = now.addingTimeInterval(TimeInterval(minutes * 60))
+        if let task = activeLiveNudgeTask(at: now),
            let idx = tasks.firstIndex(where: { $0.id == task.id }) {
             tasks[idx].snoozedUntil = snoozeDate
-            if pinnedLiveActivityTaskID == task.id {
-                pinnedLiveActivityTaskID = nil
-            }
             persistence.saveTasks(tasks)
-        } else if let event = activeLiveNudgeEvent {
+        } else if let event = activeLiveNudgeEvent(at: now) {
             dismissedEventIDs.insert(event.id)
         }
+        nudgeClockRevision &+= 1
         onHitRectNeedsUpdate?()
+        scheduleNextNudgeWakeup(now: now)
+    }
+
+    /// Computes the earliest upcoming timestamp when a snoozed task, scheduled nudge/reminder window,
+    /// calendar event lead window, or Focus Guard snooze should wake up automatically.
+    public func nextScheduledNudgeWakeDate(now: Date = Date()) -> Date? {
+        var candidates: [Date] = []
+
+        for task in tasks where !task.isCompleted {
+            if let snoozed = task.snoozedUntil, snoozed > now {
+                candidates.append(snoozed)
+            }
+            if let due = task.dueDate {
+                let isSnoozed = task.snoozedUntil.map { $0 > now } ?? false
+                if !isSnoozed {
+                    let nudgeStart = due.addingTimeInterval(-15 * 60)
+                    if nudgeStart > now {
+                        candidates.append(nudgeStart)
+                    }
+                }
+                if !autoTriggeredReminderTaskIDs.contains(task.id),
+                   let windowStart = task.reminderWindowStartDate(),
+                   windowStart > now {
+                    candidates.append(windowStart)
+                }
+            }
+        }
+
+        for event in eventKit.upcomingEvents where !event.isAllDay && !dismissedEventIDs.contains(event.id) {
+            let leadMinutes = Double(max(10, (event.travelTimeMinutes ?? 0) + 10)) * 60
+            let triggerAt = event.startDate.addingTimeInterval(-leadMinutes)
+            if triggerAt > now {
+                candidates.append(triggerAt)
+            }
+        }
+
+        if let guardSnooze = focusGuardSnoozedUntil, guardSnooze > now {
+            candidates.append(guardSnooze)
+        }
+
+        return candidates.min()
+    }
+
+    /// Refreshes snooze expiry, pre-due reminders, Focus Guard, and SwiftUI live-activity invalidation.
+    @discardableResult
+    public func refreshLiveActivityState(now: Date = Date()) -> Bool {
+        var wokeTasks: [TaskItem] = []
+        var didMutateTasks = false
+        for idx in tasks.indices where !tasks[idx].isCompleted {
+            if let snoozed = tasks[idx].snoozedUntil, snoozed <= now {
+                tasks[idx].snoozedUntil = nil
+                didMutateTasks = true
+                let withinDueWindow = tasks[idx].dueDate.map { due in
+                    let delta = due.timeIntervalSince(now)
+                    return delta <= 15 * 60 && delta >= -4 * 3600
+                } ?? false
+                if pinnedLiveActivityTaskID == tasks[idx].id || withinDueWindow {
+                    wokeTasks.append(tasks[idx])
+                }
+            }
+        }
+        if didMutateTasks {
+            persistence.saveTasks(tasks)
+        }
+
+        if let guardSnooze = focusGuardSnoozedUntil, guardSnooze <= now {
+            focusGuardSnoozedUntil = nil
+        }
+
+        evaluatePreDueReminders(now: now)
+        evaluateFocusGuard(now: now)
+        nudgeClockRevision &+= 1
+        onHitRectNeedsUpdate?()
+        scheduleNextNudgeWakeup(now: now)
+
+        if !wokeTasks.isEmpty {
+            if settings.soundEnabled {
+                NSSound(named: NSSound.Name("Tink"))?.play()
+            }
+            if let firstWoke = wokeTasks.first {
+                sendNotification(title: "Task Reminder", body: firstWoke.title)
+            }
+        }
+        return !wokeTasks.isEmpty
+    }
+
+    private func scheduleNextNudgeWakeup(now: Date = Date()) {
+        nudgeWakeTimer?.invalidate()
+        nudgeWakeTimer = nil
+        guard enableSystemIntegrationsFlag,
+              let nextWake = nextScheduledNudgeWakeDate(now: now) else {
+            return
+        }
+        // Pad slightly past target timestamp so wall-clock Date() checks compare >= target.
+        let delay = max(0.25, nextWake.timeIntervalSince(now) + 0.2)
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshLiveActivityState()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        nudgeWakeTimer = timer
     }
 
     public func completeActiveNudge() {
         if healthService.isEyeBreakDue {
             healthService.completeEyeBreak()
+            nudgeClockRevision &+= 1
             onHitRectNeedsUpdate?()
             return
         }
@@ -723,7 +854,9 @@ public final class NotchNestModel {
             toggleTask(task.id)
         } else if let event = activeLiveNudgeEvent {
             dismissedEventIDs.insert(event.id)
+            nudgeClockRevision &+= 1
             onHitRectNeedsUpdate?()
+            scheduleNextNudgeWakeup()
         }
     }
 
@@ -741,7 +874,9 @@ public final class NotchNestModel {
             eventKit.deleteReminder(identifier: removed.reminderIdentifier)
         }
         persistence.saveTasks(tasks)
+        nudgeClockRevision &+= 1
         onHitRectNeedsUpdate?()
+        scheduleNextNudgeWakeup()
     }
 
     public func clearCompletedTasks() {
@@ -1492,6 +1627,7 @@ public final class NotchNestModel {
         if transientLiveActivity?.title.hasPrefix("Focus Guard") == true {
             dismissTransientLiveActivity()
         }
+        scheduleNextNudgeWakeup(now: now)
     }
 
     @discardableResult
@@ -1871,6 +2007,8 @@ public final class NotchNestModel {
         hotKeyManager?.unregister()
         nudgeRefreshTimer?.invalidate()
         nudgeRefreshTimer = nil
+        nudgeWakeTimer?.invalidate()
+        nudgeWakeTimer = nil
         microTimerTickTimer?.invalidate()
         microTimerTickTimer = nil
     }
@@ -1918,7 +2056,9 @@ public final class NotchNestModel {
     private func setupIntegrations() {
         eventKit.onEventsRefreshed = { [weak self] _ in
             self?.refreshTravelTimes()
+            self?.nudgeClockRevision &+= 1
             self?.onHitRectNeedsUpdate?()
+            self?.scheduleNextNudgeWakeup()
         }
         eventKit.refreshEvents()
 
@@ -1942,20 +2082,21 @@ public final class NotchNestModel {
         }
 
         // Refresh timer state, weather, and live nudge window periodically
-        nudgeRefreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+        let refreshTimer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.ensureTodayDailyNote()
-                self.evaluatePreDueReminders()
-                self.evaluateFocusGuard()
+                self.refreshLiveActivityState()
                 if self.timer.state != self.lastObservedTimerState {
                     self.lastObservedTimerState = self.timer.state
                     self.syncAmbientAudio()
                 }
-                self.onHitRectNeedsUpdate?()
                 self.refreshWeather(force: false)
             }
         }
+        RunLoop.main.add(refreshTimer, forMode: .common)
+        nudgeRefreshTimer = refreshTimer
+        scheduleNextNudgeWakeup()
 
         healthService.onEyeBreakDue = { [weak self] in
             guard let self else { return }

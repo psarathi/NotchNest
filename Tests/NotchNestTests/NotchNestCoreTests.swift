@@ -1223,4 +1223,60 @@ struct NotchNestCoreTests {
         #expect(decoded.focusGuardIncludeBrowsers == false)
         #expect(decoded.focusGuardAllowlist == "Terminal, Xcode, Cursor, Antigravity, Notes, NotchNest")
     }
+
+    @Test("Snoozed due and pinned task reminders schedule wakeup and auto-reactivate without hover")
+    @MainActor
+    func snoozedTaskReminderAutoReactivatesAfterExpiry() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NotchNestSnoozeWakeTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let t0 = Date(timeIntervalSince1970: 1_795_005_000)
+        let model = NotchNestModel(persistence: PersistenceStore(baseDirectory: tempDir), enableSystemIntegrations: false)
+        defer { model.shutdown() }
+
+        var hitRectUpdates = 0
+        model.onHitRectNeedsUpdate = { hitRectUpdates += 1 }
+
+        // 1. Pinned task without due date: snoozing keeps pin intact and wakes at snooze expiry
+        model.addTask(title: "Call bank", bucket: .today)
+        let pinnedID = model.tasks.first!.id
+        model.pinTaskAsLiveNudge(pinnedID)
+        #expect(model.activeLiveNudgeTask(at: t0)?.id == pinnedID)
+        #expect(model.showsLiveActivityPill(at: t0) == true)
+
+        let revBeforeSnooze = model.nudgeClockRevision
+        model.snoozeActiveNudge(minutes: 5, now: t0)
+        #expect(model.pinnedLiveActivityTaskID == pinnedID)
+        #expect(model.nudgeClockRevision > revBeforeSnooze)
+        #expect(model.showsLiveActivityPill(at: t0) == false)
+        #expect(model.showsLiveActivityPill(at: t0.addingTimeInterval(120)) == false)
+        #expect(model.nextScheduledNudgeWakeDate(now: t0) == t0.addingTimeInterval(300))
+
+        let revBeforeWake = model.nudgeClockRevision
+        let updatesBeforeWake = hitRectUpdates
+        let wokePinned = model.refreshLiveActivityState(now: t0.addingTimeInterval(300))
+        #expect(wokePinned == true)
+        #expect(model.nudgeClockRevision > revBeforeWake)
+        #expect(hitRectUpdates > updatesBeforeWake)
+        #expect(model.isHoveringNotch == false)
+        #expect(model.activeLiveNudgeTask(at: t0.addingTimeInterval(300))?.id == pinnedID)
+        #expect(model.showsLiveActivityPill(at: t0.addingTimeInterval(300)) == true)
+
+        // 2. Unpinned due task entering & snoozing across 15m window wakes automatically at snooze expiry
+        model.pinTaskAsLiveNudge(pinnedID) // unpin
+        model.toggleTask(pinnedID)
+        let dueTime = t0.addingTimeInterval(600)
+        model.addTask(title: "Submit report", bucket: .today, dueDate: dueTime)
+        #expect(model.activeLiveNudgeTask(at: t0)?.title == "Submit report")
+
+        model.snoozeActiveNudge(minutes: 5, now: t0)
+        #expect(model.activeLiveNudgeTask(at: t0.addingTimeInterval(299)) == nil)
+        #expect(model.nextScheduledNudgeWakeDate(now: t0) == t0.addingTimeInterval(300))
+
+        let wokeDue = model.refreshLiveActivityState(now: t0.addingTimeInterval(300))
+        #expect(wokeDue == true)
+        #expect(model.activeLiveNudgeTask(at: t0.addingTimeInterval(300))?.title == "Submit report")
+        #expect(model.showsLiveActivityPill(at: t0.addingTimeInterval(300)) == true)
+    }
 }
