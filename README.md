@@ -42,12 +42,16 @@ swift test --disable-sandbox
 # Or build a Universal (arm64 + x86_64) .app bundle for both M-series and Intel Macs
 ./scripts/build_app.sh release universal
 
+# Optional: specify a signing identity explicitly (otherwise auto-selects NotchNest Local / Apple Development if present)
+CODESIGN_IDENTITY="NotchNest Local" ./scripts/build_app.sh release universal
+
 # Verify code signature & launch
 codesign --verify --deep --strict build/NotchNest.app
-open build/NotchNest.app
+cp -R build/NotchNest.app /Applications/
+open /Applications/NotchNest.app
 ```
 
-When copying an ad-hoc signed `NotchNest.app` to another Mac via AirDrop or Finder, strip Gatekeeper quarantine once before launching:
+To avoid macOS re-prompting for Calendar, Reminders, Mic, Camera, or Accessibility permissions across rebuilds (and avoid 7-day provisioning expiry on home Macs), create a 10-year `NotchNest Local` Code Signing certificate once in **Keychain Access → Certificate Assistant → Create a Certificate…** (`Code Signing`, Self Signed Root, 3650 days, set Trust → Always Trust), export the `.p12` to your other home Macs, and `build_app.sh` will automatically sign with it. When copying `NotchNest.app` via AirDrop or Finder, strip Gatekeeper quarantine once before launching:
 
 ```bash
 xattr -cr /Applications/NotchNest.app

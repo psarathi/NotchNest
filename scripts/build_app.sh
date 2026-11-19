@@ -115,9 +115,33 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
 PLIST
 
 plutil -lint "$CONTENTS/Info.plist" >/dev/null
-codesign --force --deep --sign - "$APP_BUNDLE"
+
+resolve_codesign_identity() {
+    if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
+        printf '%s\n' "$CODESIGN_IDENTITY"
+        return 0
+    fi
+    local identities preferred match_hash
+    identities="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+    for preferred in "NotchNest Local" "NotchNest Dev" "Developer ID Application" "Apple Development"; do
+        match_hash="$(printf '%s\n' "$identities" | grep -m1 "$preferred" | awk '{print $2}' || true)"
+        if [[ -n "$match_hash" ]]; then
+            printf '%s\n' "$match_hash"
+            return 0
+        fi
+    done
+    printf '%s\n' "-"
+}
+
+SIGN_IDENTITY="$(resolve_codesign_identity)"
+if [[ "$SIGN_IDENTITY" == "-" ]]; then
+    echo "Signing ad-hoc (-); TCC permissions may re-prompt across rebuilds."
+else
+    echo "Signing with Keychain identity: $SIGN_IDENTITY"
+fi
+codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
 
 echo "Built $APP_BUNDLE"
 file "$MACOS_DIR/NotchNest"
 lipo -info "$MACOS_DIR/NotchNest"
-codesign -dv "$APP_BUNDLE" 2>&1 | grep -E "Identifier|Format|Signature" || true
+codesign -dv "$APP_BUNDLE" 2>&1 | grep -E "Identifier|Format|Signature|Authority|TeamIdentifier" || true
